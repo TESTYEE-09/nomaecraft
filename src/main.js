@@ -960,12 +960,6 @@ nameInput.value = localStorage.getItem('nmc_name') || '';
 
 function readName() { myName = (nameInput.value.trim() || 'Steve').slice(0, 16); localStorage.setItem('nmc_name', myName); }
 
-document.getElementById('btn-single').onclick = () => {
-  readName();
-  multiplayer = false;
-  if (!loadSave()) { rebuildWorld((Math.random() * 1e9) | 0); }
-  startGame();
-};
 
 document.getElementById('btn-online').onclick = async () => {
   readName();
