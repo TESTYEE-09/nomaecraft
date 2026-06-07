@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Nomaecraft — a multiplayer voxel sandbox</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%235fae46'/><rect y='10' width='16' height='6' fill='%23866043'/></svg>" />
+<link rel="stylesheet" href="style.css" />
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.1/build/three.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<!-- Crosshair -->
+<div id="crosshair">+</div>
+
+<!-- HUD -->
+<div id="hud" class="hidden">
+  <div id="stats">
+    <div id="health" class="bar"></div>
+    <div id="hunger" class="bar"></div>
+    <div id="air" class="bar"></div>
+  </div>
+  <div id="hotbar"></div>
+</div>
+
+<!-- Mining progress overlay handled in-world; crack via opacity on crosshair -->
+<div id="minering"></div>
+
+<!-- Inventory / Crafting -->
+<div id="inventory" class="panel hidden">
+  <h2>Inventory</h2>
+  <div id="crafting">
+    <div>
+      <div class="craft-label" id="craft-title">Crafting (2×2)</div>
+      <div id="craft-grid" class="grid"></div>
+    </div>
+    <div class="craft-arrow">→</div>
+    <div>
+      <div class="craft-label">Result</div>
+      <div id="craft-out" class="grid out"></div>
+    </div>
+  </div>
+  <div id="inv-main" class="grid"></div>
+  <div id="inv-hotbar" class="grid"></div>
+  <p class="hint">Click an item then click another slot to move it. Click the result to craft. Press <b>E</b> to close. Stand near a <b>Crafting Table</b> for the 3×3 grid.</p>
+</div>
+
+<!-- Chat -->
+<div id="chat">
+  <div id="chat-log"></div>
+  <input id="chat-input" class="hidden" maxlength="120" placeholder="Say something… (Enter to send, Esc to cancel)" />
+</div>
+
+<!-- Hurt overlay -->
+<div id="hurt"></div>
+<div id="underwater"></div>
+
+<!-- Death screen -->
+<div id="death" class="overlay hidden">
+  <h1>You Died</h1>
+  <p id="death-msg"></p>
+  <button id="respawn-btn">Respawn</button>
+</div>
+
+<!-- Main menu -->
+<div id="menu" class="overlay">
+  <div class="menu-card">
+    <h1>NOMAECRAFT</h1>
+    <p class="tag">A voxel sandbox with mining, crafting, day/night, survival &amp; <b>multiplayer</b>.</p>
+    <label>Your name <input id="name-input" maxlength="16" placeholder="Steve" /></label>
+
+    <div class="menu-section">
+      <button id="btn-single">▶ Play Singleplayer</button>
+    </div>
+
+    <div class="menu-section">
+      <h3>Multiplayer</h3>
+      <button id="btn-host">🌐 Host a World &amp; get a room code</button>
+      <div class="join-row">
+        <input id="room-input" maxlength="5" placeholder="ROOM CODE" />
+        <button id="btn-join">Join</button>
+      </div>
+      <div id="net-status" class="net-status"></div>
+    </div>
+
+    <details class="help">
+      <summary>How to play / controls</summary>
+      <ul>
+        <li><b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> sneak/descend · <b>Ctrl/hold W</b> sprint</li>
+        <li><b>Mouse</b> look · <b>Left-click</b> mine / attack · <b>Right-click</b> place block</li>
+        <li><b>1–9</b> or scroll: select hotbar · <b>E</b> inventory &amp; crafting · <b>F</b> toggle fly</li>
+        <li><b>T</b> chat · <b>Esc</b> release mouse</li>
+        <li>Survive: watch <b>health</b> ❤ and <b>hunger</b> 🍗. Eat food, build shelter before night — zombies spawn in the dark!</li>
+      </ul>
+    </details>
+    <p class="share-note" id="share-note"></p>
+  </div>
+</div>
+
+<div id="loading" class="overlay hidden"><div class="spinner"></div><p id="loading-text">Generating world…</p></div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
