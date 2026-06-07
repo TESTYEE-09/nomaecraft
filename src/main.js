@@ -70,10 +70,10 @@ highlightBox.visible = false; scene.add(highlightBox);
 // based on breakProgress. Using a billboard plane (instead of a 6-face box)
 // avoids the z-fighting / transparent-sorted nightmares we had before.
 const crackPlane = new THREE.Mesh(
-  new THREE.PlaneGeometry(1.15, 1.15),
+  new THREE.BoxGeometry(1.02, 1.02, 1.02),
   new THREE.MeshBasicMaterial({
     map: atlas.texture, transparent: true, alphaTest: 0.05,
-    depthTest: false, depthWrite: false,
+    depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
   })
 );
 crackPlane.visible = false;
@@ -102,10 +102,14 @@ function applyCrackStage(stage) {
   const cu = atlas.crackUVs[stage] || atlas.crackUVs[atlas.crackUVs.length - 1];
   // PlaneGeometry has 4 verts in order: TL, TR, BL, BR → (u0,v0)(u1,v0)(u0,v1)(u1,v1)
   const uvAttr = crackPlane.geometry.attributes.uv;
-  uvAttr.setXY(0, cu.u0, cu.v0);
-  uvAttr.setXY(1, cu.u1, cu.v0);
-  uvAttr.setXY(2, cu.u0, cu.v1);
-  uvAttr.setXY(3, cu.u1, cu.v1);
+  // BoxGeometry has 24 uvs (4 per face) — map the crack tile onto every face.
+  for (let f = 0; f < 6; f++) {
+    const o = f * 4;
+    uvAttr.setXY(o + 0, cu.u0, cu.v1);
+    uvAttr.setXY(o + 1, cu.u1, cu.v1);
+    uvAttr.setXY(o + 2, cu.u0, cu.v0);
+    uvAttr.setXY(o + 3, cu.u1, cu.v0);
+  }
   uvAttr.needsUpdate = true;
 }
 let currentTarget = null; // {hit, place, block} from per-frame raycast
@@ -1020,7 +1024,7 @@ function loop(now) {
     if (mining && isGunSelected()) fireGun();
     if (hitMarkerT > 0) { hitMarkerT -= dt; if (hitMarkerT <= 0) document.getElementById('hitmarker').className = ''; }
     updateTarget();
-    mineUpdate(dt);
+    try { mineUpdate(dt); } catch (err) { console.error('mineUpdate error:', err); mining = false; breakTarget = null; breakProgress = 0; }
     if (placing) useItem();
     // footstep audio: when moving on the ground
     stepCD = Math.max(0, stepCD - dt);
@@ -1053,8 +1057,9 @@ function loop(now) {
     if (after > before) Audio.playPickup();
     return left;
   };
-  dropMgr.update(dt, player, world, inventory);
-  inventory.add = _origAdd;
+  try { dropMgr.update(dt, player, world, inventory); }
+  catch (err) { console.error('dropMgr error:', err); }
+  finally { inventory.add = _origAdd; }
   syncMultiplayer(dt);
   updateSky();
   updateTorchLights();
@@ -1062,9 +1067,6 @@ function loop(now) {
 
   // underwater overlay
   document.getElementById('underwater').classList.toggle('show', player.headInWater());
-
-  // keep the crack overlay billboard-facing the camera (cheap, no allocation)
-  if (crackPlane.visible) crackPlane.lookAt(camera.position);
 
   // first-person arm animation
   if (attackAnim > 0) {
