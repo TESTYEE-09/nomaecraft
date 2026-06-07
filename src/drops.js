@@ -89,10 +89,15 @@ export class Drop {
         // scan downward from just above the drop's current y
         let y = Math.min(127, Math.max(0, Math.floor(this.pos.y)));
         while (y > 0 && !w.isSolid(gx, y, gz) && w.getBlock(gx, y, gz) !== BLOCK.WATER) y--;
-        if (w.isSolid(gx, y, gz) || w.getBlock(gx, y, gz) === BLOCK.WATER) this._groundY = y + 1;
-        else this._groundY = 0;
-      } else { this._groundY = 0; }
-      this._groundDirty = false;
+        if (w.isSolid(gx, y, gz) || w.getBlock(gx, y, gz) === BLOCK.WATER) {
+          this._groundY = y + 1;
+          this._groundDirty = false;
+        } else {
+          // chunk not loaded — keep scanning next frame, suspend at current pos
+          this._groundY = Math.max(1, Math.floor(this.pos.y));
+          this._groundDirty = true;
+        }
+      } else { this._groundY = Math.max(1, Math.floor(this.pos.y)); }
     }
     if (this.pos.y < this._groundY + 0.05) {
       this.pos.y = this._groundY + 0.05;

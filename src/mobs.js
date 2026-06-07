@@ -245,7 +245,7 @@ export class MobManager {
         // drops if killed (hp<=0); natural despawn gives nothing
         if (m.hp <= 0 && m.def.drop) {
           const [lo, hi] = m.def.dropN; const n = lo + Math.floor(Math.random() * (hi - lo + 1));
-          if (n > 0) onDrop(m.def.drop, n);
+          if (n > 0) onDrop(m.def.drop, n, m.pos);
         }
         this.scene.remove(m.group);
       }

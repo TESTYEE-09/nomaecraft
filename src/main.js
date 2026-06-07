@@ -1227,12 +1227,9 @@ function loop(now) {
 
   dayTime += dt;
   world.update(player.pos.x, player.pos.z, RENDER_DIST);
-  mobs.update(dt, player, isNight(), (id, n) => {
-    // mob death drop — spawn a world entity near the mob's last position.
-    // We don't have the mob reference here, so spawn at the player; the
-    // pickup AABB is 1.5m so the player almost always grabs it on the spot.
+  mobs.update(dt, player, isNight(), (id, n, mobPos) => {
     dropMgr.spawn(id, n,
-      { x: player.pos.x, y: player.pos.y + 1.0, z: player.pos.z },
+      { x: mobPos.x, y: mobPos.y + 0.5, z: mobPos.z },
       { x: (Math.random() - 0.5) * 1.2, y: 1.4, z: (Math.random() - 0.5) * 1.2 });
   });
   // dropped-item physics + pickup (plays playPickup() on successful pickup).
