@@ -14,9 +14,12 @@ import { DropManager } from './drops.js';
 // Globals
 // ---------------------------------------------------------------------------
 const canvas = document.getElementById('game');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.1, 2000);
@@ -98,6 +101,8 @@ let mining = false, placing = false, locked = false, paused = true, invOpen = fa
 let breakTarget = null, breakProgress = 0;
 let eatCD = 0, placeCD = 0, attackAnim = 0, sprintTapT = 0;
 let stepCD = 0;  // footstep throttle (seconds)
+let gunCD = 0, reloading = false, reloadT = 0;  // FPS gun state
+let hitMarkerT = 0;  // hit-marker flash timer
 
 const keymap = {
   KeyW: 'forward', KeyS: 'back', KeyA: 'left', KeyD: 'right',
@@ -114,6 +119,7 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyF') { player.flying = !player.flying; player.vel.set(0, 0, 0); flash('Fly: ' + (player.flying ? 'ON' : 'OFF')); }
   if (e.code === 'KeyT' && !invOpen && !paused) { e.preventDefault(); openChat(); }
   if (e.code === 'KeyQ' && !invOpen && !paused) { e.preventDefault(); dropOneFromHotbar(); }
+  if (e.code === 'KeyR' && !invOpen && !paused) { e.preventDefault(); startReload(); }
   if (e.code === 'Escape') { if (invOpen) toggleInventory(); }
 });
 addEventListener('keyup', (e) => {
@@ -130,7 +136,7 @@ canvas.addEventListener('mousedown', (e) => {
   if (paused || invOpen) return;
   Audio.resumeAudio();
   if (!locked) { canvas.requestPointerLock(); return; }
-  if (e.button === 0) { mining = true; swingAttack(); }
+  if (e.button === 0) { mining = true; if (isGunSelected()) fireGun(); else swingAttack(); }
   if (e.button === 2) { placing = true; useItem(); }
 });
 addEventListener('mouseup', (e) => { if (e.button === 0) { mining = false; breakTarget = null; breakProgress = 0; } if (e.button === 2) placing = false; });
@@ -219,7 +225,7 @@ function slotInner(s) {
   if (s.dura !== undefined && ITEMS[s.id]?.tool) { const d = document.createElement('div'); d.className = 'dura'; const i = document.createElement('i'); i.style.width = (100 * s.dura / ITEMS[s.id].tool.dura) + '%'; d.appendChild(i); frag.appendChild(d); }
   return frag;
 }
-function selectHotbar(i) { inventory.selected = i; renderHotbar(); saveSoon(); }
+function selectHotbar(i) { inventory.selected = i; reloading = false; renderHotbar(); updateAmmoHUD(); saveSoon(); }
 
 // ---------------------------------------------------------------------------
 // Block break / place
@@ -279,6 +285,7 @@ function updateTarget() {
 }
 
 function mineUpdate(dt) {
+  if (isGunSelected()) { crackPlane.visible = false; breakTarget = null; breakProgress = 0; return; }
   if (!mining || !currentTarget) {
     crackPlane.visible = false;
     if (!mining) { breakTarget = null; breakProgress = 0; currentCrackStage = -1; }
@@ -365,6 +372,82 @@ function swingAttack() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Guns (FPS mode)
+// ---------------------------------------------------------------------------
+function isGunSelected() { const s = inventory.selectedItem(); return !!(s && ITEMS[s.id]?.gun); }
+
+function giveGun() {
+  inventory.add('pistol', 1);
+  // the freshly added pistol has no ammo field yet — load a full magazine
+  for (const s of inventory.slots) if (s && s.id === 'pistol' && s.ammo === undefined) s.ammo = ITEMS.pistol.gun.mag;
+  renderHotbar();
+  updateAmmoHUD();
+  flash('🔫 Pistol acquired! Left-click to fire · R to reload.');
+  Audio.playReload();
+}
+
+function startReload() {
+  const s = inventory.selectedItem(); const def = ITEMS[s?.id];
+  if (!def?.gun || reloading) return;
+  if ((s.ammo ?? def.gun.mag) >= def.gun.mag) return; // already full
+  reloading = true; reloadT = def.gun.reload;
+  Audio.playReload();
+  updateAmmoHUD();
+}
+
+function fireGun() {
+  const s = inventory.selectedItem(); const def = ITEMS[s?.id];
+  if (!def?.gun || reloading || gunCD > 0) return;
+  if (s.ammo === undefined) s.ammo = def.gun.mag; // migrated / loaded gun
+  if (s.ammo <= 0) { Audio.playDryFire(); startReload(); return; }
+  gunCD = def.gun.fireCD;
+  s.ammo--;
+  attackAnim = 0.1; // recoil flick on the held item
+  Audio.playGunShot();
+  // shot direction with a little spread
+  const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+  if (def.gun.spread) {
+    dir.x += (Math.random() - 0.5) * def.gun.spread;
+    dir.y += (Math.random() - 0.5) * def.gun.spread;
+    dir.z += (Math.random() - 0.5) * def.gun.spread;
+    dir.normalize();
+  }
+  const origin = camera.position;
+  // clip the shot at the first solid block so you can't hit through walls
+  let maxDist = def.gun.range;
+  const vox = world.raycast(origin, dir, def.gun.range);
+  if (vox) {
+    const dx = vox.hit.x + 0.5 - origin.x, dy = vox.hit.y + 0.5 - origin.y, dz = vox.hit.z + 0.5 - origin.z;
+    maxDist = Math.min(maxDist, Math.sqrt(dx * dx + dy * dy + dz * dz));
+  }
+  const r = mobs.raycastMob(origin, dir, maxDist);
+  if (r) {
+    const killed = mobs.hitMob(r.mob, def.gun.damage, dir, def.gun.kb || 3);
+    r.mob.hurtT = 0.2;
+    Audio.playMobHurt();
+    showHitMarker(killed);
+  }
+  updateAmmoHUD();
+  renderHotbar();
+  if (s.ammo <= 0) startReload();
+}
+
+function showHitMarker(kill) {
+  const el = document.getElementById('hitmarker');
+  el.className = kill ? 'show kill' : 'show';
+  hitMarkerT = kill ? 0.4 : 0.18;
+}
+
+function updateAmmoHUD() {
+  const el = document.getElementById('ammo');
+  const s = inventory.selectedItem(); const def = ITEMS[s?.id];
+  if (!def?.gun) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  const ammo = s.ammo ?? def.gun.mag;
+  el.textContent = reloading ? 'RELOADING…' : `🔫 ${ammo} / ${def.gun.mag}`;
+}
+
 // Drop one item from the currently selected hotbar slot. Spawns it in front
 // of the player with a small forward / upward throw velocity, then plays a
 // "whoosh" sound. Empty hands = nothing.
@@ -421,6 +504,7 @@ function toggleInventory() {
     // return craft grid items to inventory
     for (const c of craftSlots) if (c) inventory.add(c.id, c.count);
     if (held) { inventory.add(held.id, held.count); held = null; }
+    if (heldEl) { heldEl.remove(); heldEl = null; }
     craftSlots = new Array(9).fill(null);
     invPanel.classList.add('hidden');
     renderHotbar();
@@ -454,8 +538,8 @@ function renderInventoryUI() {
   for (let i = 0; i < craftSize * craftSize; i++) {
     craftGrid.appendChild(makeUISlot(
       () => craftSlots[i],
-      (e, div) => craftMouseDown(i, div, e),
-      (e, div) => craftMouseUp(i, div, e),
+      (e) => slotMouseDown('craft', i, e),
+      () => {},
     ));
   }
   // result
@@ -463,7 +547,7 @@ function renderInventoryUI() {
   craftOut.innerHTML = '';
   craftOut.appendChild(makeUISlot(
     () => craftResult ? { id: craftResult.out, count: craftResult.count } : null,
-    (e, div) => { if (craftResult && !held) { takeCraft(); } },
+    () => { if (craftResult && (!held || held.id === craftResult.out)) takeCraft(); },
     () => {},
     'out-slot',
   ));
@@ -471,15 +555,15 @@ function renderInventoryUI() {
   invMain.innerHTML = '';
   for (let i = 9; i < 36; i++) invMain.appendChild(makeUISlot(
     () => inventory.slots[i],
-    (e, div) => invMouseDown(i, div, e),
-    (e, div) => invMouseUp(i, div, e),
+    (e) => slotMouseDown('inv', i, e),
+    () => {},
   ));
   // hotbar (0..8)
   invHotbar.innerHTML = '';
   for (let i = 0; i < 9; i++) invHotbar.appendChild(makeUISlot(
     () => inventory.slots[i],
-    (e, div) => invMouseDown(i, div, e),
-    (e, div) => invMouseUp(i, div, e),
+    (e) => slotMouseDown('inv', i, e),
+    () => {},
   ));
   // held item cursor
   renderHeld();
@@ -487,12 +571,11 @@ function renderInventoryUI() {
   saveSoon();
 }
 
-// ---- drag-and-drop state ----------------------------------------------------
-// dragSrc: { kind: 'craft'|'inv', i: index, x, y } when a drag is in progress.
-// We use document-level mousemove to track the cursor while dragging, and
-// figure out the target slot at mouseup by walking up from event.target.
-let dragSrc = null;
-
+// ---- drag-and-drop / click-to-move -----------------------------------------
+// `held` (declared above) is the item riding the cursor; its source slot is
+// emptied at pickup, so every move operates on `held` — never on the (now
+// empty) source slot. heldSrc/heldSrcI remember where it came from so a drop
+// outside any slot can return it.
 function findTargetSlot(e) {
   // The mouseup fires on the document (because we wired it at the document
   // level), so we need elementFromPoint to find the slot under the cursor.
@@ -522,119 +605,79 @@ function findTargetSlot(e) {
   return null;
 }
 
-function moveToCraft(i, src) {
-  const slot = craftSlots[i];
-  if (src.kind === 'craft') {
-    const from = src.i;
-    if (from === i) { held = null; return; } // drop on self = cancel
-    if (!slot) { craftSlots[i] = craftSlots[from]; craftSlots[from] = null; }
-    else if (slot.id === craftSlots[from].id) {
-      const max = ITEMS[slot.id].max; const add = Math.min(craftSlots[from].count, max - slot.count);
-      slot.count += add; craftSlots[from].count -= add; if (craftSlots[from].count <= 0) craftSlots[from] = null;
-    } else { const tmp = craftSlots[i]; craftSlots[i] = craftSlots[from]; craftSlots[from] = tmp; }
-  } else if (src.kind === 'inv') {
-    if (!slot) { craftSlots[i] = { id: inventory.slots[src.i].id, count: inventory.slots[src.i].count, dura: inventory.slots[src.i].dura }; inventory.slots[src.i] = null; }
-    else if (slot.id === inventory.slots[src.i].id) {
-      const max = ITEMS[slot.id].max; const add = Math.min(inventory.slots[src.i].count, max - slot.count);
-      slot.count += add; inventory.slots[src.i].count -= add; if (inventory.slots[src.i].count <= 0) inventory.slots[src.i] = null;
-    } else { const tmp = craftSlots[i]; craftSlots[i] = { id: inventory.slots[src.i].id, count: inventory.slots[src.i].count, dura: inventory.slots[src.i].dura }; inventory.slots[src.i] = tmp; }
-  }
-  held = null;
-}
-
-function moveToInv(i, src) {
-  const slot = inventory.slots[i];
-  if (src.kind === 'inv') {
-    const from = src.i;
-    if (from === i) { held = null; return; }
-    if (!slot) { inventory.slots[i] = inventory.slots[from]; inventory.slots[from] = null; }
-    else if (slot.id === inventory.slots[from].id) {
-      const max = ITEMS[slot.id].max; const add = Math.min(inventory.slots[from].count, max - slot.count);
-      slot.count += add; inventory.slots[from].count -= add; if (inventory.slots[from].count <= 0) inventory.slots[from] = null;
-    } else { const tmp = inventory.slots[i]; inventory.slots[i] = inventory.slots[from]; inventory.slots[from] = tmp; }
-  } else if (src.kind === 'craft') {
-    if (!slot) { inventory.slots[i] = { id: craftSlots[src.i].id, count: craftSlots[src.i].count, dura: craftSlots[src.i].dura }; craftSlots[src.i] = null; }
-    else if (slot.id === craftSlots[src.i].id) {
-      const max = ITEMS[slot.id].max; const add = Math.min(craftSlots[src.i].count, max - slot.count);
-      slot.count += add; craftSlots[src.i].count -= add; if (craftSlots[src.i].count <= 0) craftSlots[src.i] = null;
-    } else { const tmp = inventory.slots[i]; inventory.slots[i] = { id: craftSlots[src.i].id, count: craftSlots[src.i].count, dura: craftSlots[src.i].dura }; craftSlots[src.i] = tmp; }
-  }
-  held = null;
-}
-
-function craftMouseDown(i, div, e) {
-  const slot = craftSlots[i];
-  if (!slot && !held) return; // nothing to grab
-  dragStartX = e.clientX; dragStartY = e.clientY; dragMoved = false;
-  if (held) { moveToCraft(i, { kind: heldSrc || 'inv', i: heldSrcI }); }
-  else { held = slot; heldSrc = 'craft'; heldSrcI = i; craftSlots[i] = null; }
-  renderInventoryUI();
-}
-function craftMouseUp(i, div, e) {
-  // mouseup on a slot: complete a drag if one is in progress
-  if (dragSrc) { endDrag(e); return; }
-  // pure click: if we just picked up and mouseup is on the same slot, put it back
-  if (held && heldSrc === 'craft' && heldSrcI === i) { craftSlots[i] = held; held = null; renderInventoryUI(); }
-}
-function invMouseDown(i, div, e) {
-  const slot = inventory.slots[i];
-  if (!slot && !held) return;
-  dragStartX = e.clientX; dragStartY = e.clientY; dragMoved = false;
-  if (held) { moveToInv(i, { kind: heldSrc, i: heldSrcI }); }
-  else { held = slot; heldSrc = 'inv'; heldSrcI = i; inventory.slots[i] = null; }
-  renderInventoryUI();
-}
-function invMouseUp(i, div, e) {
-  if (dragSrc) { endDrag(e); return; }
-  if (held && heldSrc === 'inv' && heldSrcI === i) { inventory.slots[i] = held; held = null; renderInventoryUI(); }
-}
-
-// track the drag start in a document-level mousedown handler so we can
-// distinguish a click (mouseup on same slot) from a drag (mouseup elsewhere)
-let heldSrc = null; // 'craft' | 'inv' | null
+let heldSrc = null;      // 'craft' | 'inv' — where the held item came from
 let heldSrcI = -1;
-let dragMoved = false;
+let dragMoved = false;   // did the cursor travel far enough to be a drag?
 let dragStartX = 0, dragStartY = 0;
 const DRAG_THRESHOLD = 4; // px
 
-document.addEventListener('mousemove', (e) => {
-  if (held && invOpen) {
-    if (!dragMoved) {
-      const dx = e.clientX - dragStartX, dy = e.clientY - dragStartY;
-      if (dx * dx + dy * dy > DRAG_THRESHOLD * DRAG_THRESHOLD) {
-        dragMoved = true;
-        dragSrc = { kind: heldSrc, i: heldSrcI };
-      }
-    }
-    if (heldEl) { heldEl.style.left = (e.clientX - 19) + 'px'; heldEl.style.top = (e.clientY - 19) + 'px'; }
+function slotsOf(kind) { return kind === 'craft' ? craftSlots : inventory.slots; }
+
+// Pick the item out of (kind,i) onto the cursor. No-op on an empty slot.
+function pickUp(kind, i) {
+  const arr = slotsOf(kind);
+  if (!arr[i]) return;
+  held = arr[i]; arr[i] = null;
+  heldSrc = kind; heldSrcI = i;
+}
+
+// Commit the held item into (kind,i): fill if empty, stack if same id,
+// otherwise swap (the displaced item stays on the cursor).
+function dropHeldInto(kind, i) {
+  if (!held) return;
+  const arr = slotsOf(kind);
+  const target = arr[i];
+  if (!target) { arr[i] = held; held = null; }
+  else if (target.id === held.id) {
+    const max = ITEMS[target.id].max;
+    const add = Math.min(held.count, max - target.count);
+    target.count += add; held.count -= add;
+    if (held.count <= 0) held = null; // fully merged; leftover (if any) stays held
+  } else {
+    arr[i] = held; held = target; heldSrc = kind; heldSrcI = i; // swap
   }
+}
+
+// Put whatever is on the cursor back where it came from (or anywhere free).
+function returnHeld() {
+  if (!held) return;
+  const arr = slotsOf(heldSrc);
+  if (heldSrc && heldSrcI >= 0 && !arr[heldSrcI]) arr[heldSrcI] = held;
+  else inventory.add(held.id, held.count);
+  held = null;
+}
+
+// mousedown on a slot: place the held item (click-to-place) or pick this one
+// up (click-to-pick / start of a drag). The actual drag drop is finalized in
+// the document-level mouseup so it works wherever the cursor is released.
+function slotMouseDown(kind, i, e) {
+  dragStartX = e.clientX; dragStartY = e.clientY; dragMoved = false;
+  if (held) dropHeldInto(kind, i);
+  else pickUp(kind, i);
+  renderInventoryUI();
+}
+
+document.addEventListener('mousemove', (e) => {
+  if (!held || !invOpen) return;
+  if (!dragMoved) {
+    const dx = e.clientX - dragStartX, dy = e.clientY - dragStartY;
+    if (dx * dx + dy * dy > DRAG_THRESHOLD * DRAG_THRESHOLD) dragMoved = true;
+  }
+  if (heldEl) { heldEl.style.left = (e.clientX - 19) + 'px'; heldEl.style.top = (e.clientY - 19) + 'px'; }
 });
 document.addEventListener('mouseup', (e) => {
-  if (dragSrc) endDrag(e);
-  // reset drag state for the next pickup
-  dragMoved = false; dragSrc = null; heldSrc = null; heldSrcI = -1;
-});
-
-function endDrag(e) {
-  const target = findTargetSlot(e);
-  if (!target) {
-    // dropped outside any slot — return to source
-    if (held && heldSrc === 'craft') craftSlots[heldSrcI] = held;
-    else if (held && heldSrc === 'inv') inventory.slots[heldSrcI] = held;
-    held = null;
-  } else if (target.kind === 'craft') {
-    moveToCraft(target.i, dragSrc);
-  } else if (target.kind === 'inv') {
-    moveToInv(target.i, dragSrc);
-  } else if (target.kind === 'out') {
-    // dropped on the result slot — drop back to source
-    if (held && heldSrc === 'craft') craftSlots[heldSrcI] = held;
-    else if (held && heldSrc === 'inv') inventory.slots[heldSrcI] = held;
-    held = null;
+  if (e.button !== 0) return;
+  // Only finalize on a genuine drag; a plain click was already handled on
+  // mousedown, and leaves the item on the cursor for click-to-move.
+  if (dragMoved && held) {
+    const target = findTargetSlot(e);
+    if (target && target.kind !== 'out') dropHeldInto(target.kind, target.i);
+    else returnHeld();
+    renderInventoryUI();
+    renderHotbar();
   }
-  renderInventoryUI();
-  renderHotbar();
-}
+  dragMoved = false;
+});
 
 let heldEl = null;
 function renderHeld() {
@@ -645,7 +688,6 @@ function renderHeld() {
   heldEl.appendChild(slotInner(held));
   document.body.appendChild(heldEl);
 }
-addEventListener('mousemove', (e) => { if (heldEl) { heldEl.style.left = (e.clientX - 19) + 'px'; heldEl.style.top = (e.clientY - 19) + 'px'; } });
 
 function takeCraft() {
   if (!craftResult) return;
@@ -669,9 +711,21 @@ function openChat() { document.exitPointerLock(); chatInput.classList.remove('hi
 function closeChat() { chatInput.classList.add('hidden'); chatInput.value = ''; }
 chatInput.addEventListener('keydown', (e) => {
   e.stopPropagation();
-  if (e.code === 'Enter') { const t = chatInput.value.trim(); if (t) { addChat(myName, t); if (multiplayer && net) net.sendChat(myName, t); } closeChat(); }
+  if (e.code === 'Enter') {
+    const t = chatInput.value.trim();
+    if (t && !handleChatCommand(t)) { addChat(myName, t); if (multiplayer && net) net.sendChat(myName, t); }
+    closeChat();
+  }
   else if (e.code === 'Escape') closeChat();
 });
+// Chat "cheat" commands. Returns true if the text was a recognized command
+// (and therefore should NOT be broadcast as a normal chat message).
+function handleChatCommand(t) {
+  const cmd = t.toLowerCase().replace(/\s+/g, '');
+  if (cmd === '-gun-' || cmd === '-gun') { giveGun(); return true; }
+  return false;
+}
+
 function addChat(name, text) {
   const line = document.createElement('div');
   line.className = 'line' + (name === 'system' ? ' sys' : '');
@@ -941,6 +995,19 @@ function loop(now) {
   if (!invOpen) {
     player.update(dt, input);
     eatCD = Math.max(0, eatCD - dt); placeCD = Math.max(0, placeCD - dt); attackAnim = Math.max(0, attackAnim - dt);
+    // gun timers + auto-fire while the trigger is held
+    gunCD = Math.max(0, gunCD - dt);
+    if (reloading) {
+      reloadT -= dt;
+      if (reloadT <= 0) {
+        reloading = false;
+        const s = inventory.selectedItem(); const def = ITEMS[s?.id];
+        if (def?.gun) { s.ammo = def.gun.mag; renderHotbar(); }
+        updateAmmoHUD();
+      }
+    }
+    if (mining && isGunSelected()) fireGun();
+    if (hitMarkerT > 0) { hitMarkerT -= dt; if (hitMarkerT <= 0) document.getElementById('hitmarker').className = ''; }
     updateTarget();
     mineUpdate(dt);
     if (placing) useItem();

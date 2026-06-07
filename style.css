@@ -7,6 +7,18 @@ button { cursor: pointer; }
 /* Crosshair */
 #crosshair { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 26px; color: rgba(255,255,255,0.85); text-shadow: 0 0 2px #000; pointer-events: none; z-index: 5; user-select: none; mix-blend-mode: difference; }
 
+/* Hit marker: an X that flashes when a gun shot lands. Red + bigger on a kill. */
+#hitmarker { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; transform: translate(-50%, -50%) scale(0.6); pointer-events: none; z-index: 7; opacity: 0; }
+#hitmarker::before, #hitmarker::after { content: ''; position: absolute; left: 50%; top: 50%; width: 16px; height: 3px; background: #fff; box-shadow: 0 0 3px #000; border-radius: 2px; }
+#hitmarker::before { transform: translate(-50%, -50%) rotate(45deg); }
+#hitmarker::after  { transform: translate(-50%, -50%) rotate(-45deg); }
+#hitmarker.show { opacity: 1; transform: translate(-50%, -50%) scale(1); transition: opacity 0.05s, transform 0.05s; }
+#hitmarker.show.kill { transform: translate(-50%, -50%) scale(1.4); }
+#hitmarker.show.kill::before, #hitmarker.show.kill::after { background: #ff3030; height: 4px; }
+
+/* Ammo counter */
+#ammo { pointer-events: none; font-weight: bold; font-size: 16px; letter-spacing: 1px; text-shadow: 1px 1px 0 #000, 0 0 6px rgba(0,0,0,0.6); background: rgba(0,0,0,0.35); padding: 3px 10px; border-radius: 6px; }
+
 /* HUD */
 #hud { position: fixed; left: 0; right: 0; bottom: 12px; z-index: 6; pointer-events: none; display: flex; flex-direction: column; align-items: center; gap: 8px; }
 #stats { display: flex; flex-direction: column; gap: 3px; align-items: center; }

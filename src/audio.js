@@ -209,6 +209,42 @@ export function playMobHurt() {
   if (o && g) { o.connect(g).connect(master); o.start(t); o.stop(t + 0.10); }
 }
 
+// Gunshot: punchy noise crack + a quick low boom body
+export function playGunShot() {
+  const c = ensure(); if (!c) return;
+  const t = c.currentTime;
+  // sharp crack — broadband noise through a high-pass, very fast decay
+  const n = noiseSource(); const hp = biquad('highpass', 900, 0.7);
+  const g = envGain(0.001, 0.09, 0.6);
+  if (n && hp && g) { n.connect(hp).connect(g).connect(master); n.start(t); n.stop(t + 0.12); }
+  // low boom that pitches down
+  const o = tone(220, 'square');
+  o.frequency.setValueAtTime(220, t);
+  o.frequency.exponentialRampToValueAtTime(60, t + 0.12);
+  const og = envGain(0.001, 0.13, 0.4);
+  if (o && og) { o.connect(og).connect(master); o.start(t); o.stop(t + 0.15); }
+}
+
+// Dry fire (empty mag): a thin mechanical click
+export function playDryFire() {
+  const c = ensure(); if (!c) return;
+  const t = c.currentTime;
+  const o = tone(rand(1400, 1800), 'square');
+  const g = envGain(0.001, 0.03, 0.12);
+  if (o && g) { o.connect(g).connect(master); o.start(t); o.stop(t + 0.04); }
+}
+
+// Reload: two mechanical clicks (mag out / mag in)
+export function playReload() {
+  const c = ensure(); if (!c) return;
+  const t = c.currentTime;
+  for (const [t0, f] of [[0, 500], [0.18, 800], [0.42, 1200]]) {
+    const n = noiseSource(); const bp = biquad('bandpass', f, 6);
+    const g = envGain(0.001, 0.05, 0.3);
+    if (n && bp && g) { n.connect(bp).connect(g).connect(master); n.start(t + t0); n.stop(t + t0 + 0.06); }
+  }
+}
+
 // Map a block id to a sound-material label
 export function blockMaterial(blockId) {
   // dirt/sand/gravel/snow → 'dirt'

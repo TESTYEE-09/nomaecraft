@@ -171,6 +171,10 @@ export class World {
     const tr = { pos: [], norm: [], uv: [], col: [], idx: [] };
 
     const baseX = c.cx * CHUNK, baseZ = c.cz * CHUNK;
+    // 1 if the cell holds an opaque, AO-casting block. Leaves/water/glass are
+    // 'transparent' so they don't darken their neighbours.
+    const occ = (x, y, z) => this.isOpaqueNeighbor(this.getBlock(x, y, z)) ? 1 : 0;
+    const AO_LEVEL = [0.5, 0.72, 0.86, 1.0]; // darkest corner .. fully open
     const faceDefs = [
       { n: [1, 0, 0], v: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]], kind: 'side', sh: 0.8 },
       { n: [-1,0, 0], v: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]], kind: 'side', sh: 0.8 },
@@ -207,11 +211,26 @@ export class World {
             const start = tgt.pos.length / 3;
             // water surface lowered a touch
             const yTop = (b === BLOCK.WATER && this.getBlock(wx, y + 1, wz) !== BLOCK.WATER) ? 0.85 : 1;
+            // in-plane axes for ambient-occlusion sampling (axes ≠ normal axis)
+            const na = fd.n[0] ? 0 : fd.n[1] ? 1 : 2;
+            const aA = na === 0 ? 1 : 0, aB = na === 2 ? 1 : 2;
+            const bx = wx + fd.n[0], by = y + fd.n[1], bz = wz + fd.n[2];
             for (const vtx of fd.v) {
               const vy = vtx[1] === 1 ? yTop : 0;
               tgt.pos.push(wx + vtx[0], y + vy, wz + vtx[2]);
               tgt.norm.push(fd.n[0], fd.n[1], fd.n[2]);
-              tgt.col.push(fd.sh, fd.sh, fd.sh);
+              let sh = fd.sh;
+              if (!transparent) {
+                // sample the two edge neighbours + the diagonal at this corner
+                const da = vtx[aA] === 1 ? 1 : -1, db = vtx[aB] === 1 ? 1 : -1;
+                const eA = [0, 0, 0]; eA[aA] = da;
+                const eB = [0, 0, 0]; eB[aB] = db;
+                const s1 = occ(bx + eA[0], by + eA[1], bz + eA[2]);
+                const s2 = occ(bx + eB[0], by + eB[1], bz + eB[2]);
+                const cor = (s1 && s2) ? 1 : occ(bx + eA[0] + eB[0], by + eA[1] + eB[1], bz + eA[2] + eB[2]);
+                sh *= AO_LEVEL[(s1 && s2) ? 0 : 3 - (s1 + s2 + cor)];
+              }
+              tgt.col.push(sh, sh, sh);
             }
             tgt.uv.push(t.u0, t.v0, t.u0, t.v1, t.u1, t.v1, t.u1, t.v0);
             tgt.idx.push(start, start + 1, start + 2, start, start + 2, start + 3);

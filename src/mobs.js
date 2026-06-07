@@ -2,12 +2,27 @@ import { BLOCK, blockDefs } from './blocks.js';
 
 // Simple box-built mobs with gravity, wander, and (for zombies) player-chasing AI.
 const MOB_TYPES = {
-  pig:   { hostile: false, hp: 10, color: 0xe89aa0, headColor: 0xe07a82, height: 0.9, width: 0.9, speed: 1.6, drop: 'raw_meat', dropN: [1, 3] },
-  cow:   { hostile: false, hp: 10, color: 0x6b4f3a, headColor: 0x4a3525, height: 1.4, width: 0.9, speed: 1.4, drop: 'raw_meat', dropN: [1, 3] },
-  zombie:{ hostile: true,  hp: 20, color: 0x3a7a4a, headColor: 0x4a8a3a, height: 1.8, width: 0.6, speed: 2.6, drop: 'raw_meat', dropN: [0, 1], attack: 3, range: 1.5 },
+  pig:   { hostile: false, hp: 10, color: 0xe89aa0, headColor: 0xe79aa0, legColor: 0xc97f86, snout: 0xd0697a, height: 0.9, width: 0.9, speed: 1.6, drop: 'raw_meat', dropN: [1, 3] },
+  cow:   { hostile: false, hp: 10, color: 0x59453a, headColor: 0x4a3525, legColor: 0x3a2a1d, snout: 0xd9a6ac, horns: true, height: 1.4, width: 0.9, speed: 1.4, drop: 'raw_meat', dropN: [1, 3] },
+  zombie:{ hostile: true,  hp: 20, color: 0x4a7a3a, headColor: 0x6c9a4c, legColor: 0x33485f, arms: true, height: 1.8, width: 0.6, speed: 2.6, drop: 'raw_meat', dropN: [0, 1], attack: 3, range: 1.5 },
 };
 
 let nextId = 1;
+
+// Ray vs axis-aligned box (slab method). Returns the entry distance t along
+// `dir` (assumed normalized) or null if the ray misses the box.
+function rayAABB(o, d, minX, minY, minZ, maxX, maxY, maxZ) {
+  let tmin = -Infinity, tmax = Infinity;
+  for (const [oc, dc, lo, hi] of [[o.x, d.x, minX, maxX], [o.y, d.y, minY, maxY], [o.z, d.z, minZ, maxZ]]) {
+    if (Math.abs(dc) < 1e-8) { if (oc < lo || oc > hi) return null; continue; }
+    let t1 = (lo - oc) / dc, t2 = (hi - oc) / dc;
+    if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+    if (t1 > tmin) tmin = t1;
+    if (t2 < tmax) tmax = t2;
+    if (tmin > tmax) return null;
+  }
+  return tmin >= 0 ? tmin : (tmax >= 0 ? 0 : null);
+}
 
 export class Mob {
   constructor(THREE, world, type, x, y, z, id = null) {
@@ -32,29 +47,80 @@ export class Mob {
     const THREE = this.THREE;
     const d = this.def;
     this.group = new THREE.Group();
+    const w = d.width, h = d.height;
+
     const bodyMat = new THREE.MeshLambertMaterial({ color: d.color });
     const headMat = new THREE.MeshLambertMaterial({ color: d.headColor });
+    const limbMat = new THREE.MeshLambertMaterial({ color: d.legColor ?? d.color });
     this.bodyMat = bodyMat; this.headMat = headMat;
-    const w = d.width, h = d.height;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(w, h * 0.55, w * 0.7), bodyMat);
-    body.position.y = h * 0.45; this.group.add(body);
-    const head = new THREE.Mesh(new THREE.BoxGeometry(w * 0.7, h * 0.35, w * 0.7), headMat);
-    head.position.set(0, h * 0.85, w * 0.35); this.group.add(head);
+    // every coloured material we want to flash red when the mob is hurt
+    this.flashMats = [bodyMat, headMat, limbMat];
+
+    // body
+    const bodyH = h * 0.5, bodyY = h * 0.44;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(w, bodyH, w * 0.82), bodyMat);
+    body.position.y = bodyY; this.group.add(body);
+
+    // head on its own pivot so it can bob; front of the mob is +z
+    this.head = new THREE.Group();
+    this.head.position.set(0, h * 0.78, w * 0.3);
+    this.headBaseY = this.head.position.y;
+    const hs = w * 0.62;
+    const headMesh = new THREE.Mesh(new THREE.BoxGeometry(hs, hs, hs), headMat);
+    headMesh.position.z = w * 0.05; this.head.add(headMesh);
+    this.group.add(this.head);
+    const faceZ = w * 0.05 + hs * 0.5;
+
     // eyes
-    const eyeMat = new THREE.MeshBasicMaterial({ color: d.hostile ? 0xff3030 : 0x111111 });
+    const eyeMat = new THREE.MeshBasicMaterial({ color: d.hostile ? 0xff2a2a : 0x141414 });
     for (const sx of [-1, 1]) {
-      const eye = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.05), eyeMat);
-      eye.position.set(sx * w * 0.18, h * 0.9, w * 0.7); this.group.add(eye);
+      const eye = new THREE.Mesh(new THREE.BoxGeometry(hs * 0.2, hs * 0.2, 0.04), eyeMat);
+      eye.position.set(sx * hs * 0.24, hs * 0.12, faceZ + 0.01); this.head.add(eye);
     }
-    // legs
+    // snout / muzzle
+    if (d.snout) {
+      const snoutMat = new THREE.MeshLambertMaterial({ color: d.snout });
+      this.flashMats.push(snoutMat);
+      const snout = new THREE.Mesh(new THREE.BoxGeometry(hs * 0.5, hs * 0.34, hs * 0.22), snoutMat);
+      snout.position.set(0, -hs * 0.18, faceZ + hs * 0.08); this.head.add(snout);
+      const nostrilMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
+      for (const sx of [-1, 1]) { const nz = new THREE.Mesh(new THREE.BoxGeometry(hs * 0.08, hs * 0.08, 0.04), nostrilMat); nz.position.set(sx * hs * 0.12, -hs * 0.18, faceZ + hs * 0.19); this.head.add(nz); }
+    }
+    // horns
+    if (d.horns) {
+      const hornMat = new THREE.MeshLambertMaterial({ color: 0xe8e0cf });
+      this.flashMats.push(hornMat);
+      for (const sx of [-1, 1]) { const horn = new THREE.Mesh(new THREE.BoxGeometry(hs * 0.16, hs * 0.16, hs * 0.16), hornMat); horn.position.set(sx * hs * 0.42, hs * 0.5, w * 0.05); this.head.add(horn); }
+    }
+
+    // legs — each on a hip pivot so it swings from the top, not the middle
     this.legs = [];
-    const legGeo = new THREE.BoxGeometry(w * 0.22, h * 0.4, w * 0.22);
-    for (const [lx, lz] of [[-1,-1],[1,-1],[-1,1],[1,1]]) {
-      const leg = new THREE.Mesh(legGeo, bodyMat);
-      leg.position.set(lx * w * 0.28, h * 0.2, lz * w * 0.22);
-      this.group.add(leg); this.legs.push(leg);
+    const legW = w * 0.24, legH = h * 0.42, hipY = h * 0.42;
+    // order: back-left, back-right, front-left, front-right
+    for (const [lx, lz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      const pivot = new THREE.Group();
+      pivot.position.set(lx * w * 0.3, hipY, lz * w * 0.3);
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(legW, legH, legW), limbMat);
+      leg.position.y = -legH / 2; pivot.add(leg);
+      this.group.add(pivot); this.legs.push(pivot);
     }
-    this.legBase = h * 0.2;
+
+    // arms (zombie) — reach forward, swing slightly while walking
+    this.arms = [];
+    if (d.arms) {
+      const armW = w * 0.28, armH = h * 0.42;
+      for (const sx of [-1, 1]) {
+        const pivot = new THREE.Group();
+        pivot.position.set(sx * (w * 0.5 + armW * 0.45), bodyY + bodyH * 0.42, w * 0.08);
+        const arm = new THREE.Mesh(new THREE.BoxGeometry(armW, armH, armW), limbMat);
+        arm.position.y = -armH / 2; pivot.add(arm);
+        pivot.rotation.x = -Math.PI / 2; // classic outstretched reach
+        this.group.add(pivot); this.arms.push(pivot);
+      }
+    }
+
+    this.animPhase = 0;
+    this.baseColors = this.flashMats.map(m => m.color.getHex());
   }
 
   isSolid(x, y, z) { const b = this.world.getBlock(x, y, z); const def = blockDefs[b]; return def && def.solid; }
@@ -100,20 +166,27 @@ export class Mob {
     this.moveAxis('y', this.vel.y * dt);
     this.moveAxis('z', this.vel.z * dt);
 
-    // anim
-    const moving = Math.abs(this.vel.x) + Math.abs(this.vel.z) > 0.2;
-    const t = performance.now() * 0.01;
-    this.legs.forEach((leg, i) => { leg.position.y = this.legBase + (moving ? Math.sin(t + i * Math.PI) * 0.06 : 0); leg.rotation.x = moving ? Math.sin(t + i * Math.PI) * 0.5 : 0; });
+    // anim — swing the legs from the hips in a quadruped diagonal gait
+    const speed = Math.hypot(this.vel.x, this.vel.z);
+    const moving = speed > 0.2;
+    this.animPhase += dt * (moving ? 7 + speed : 0);
+    const swing = moving ? Math.sin(this.animPhase) * 0.7 : this.legs[0].rotation.x * 0.85;
+    // diagonal pairs: (back-left, front-right) vs (back-right, front-left)
+    this.legs[0].rotation.x = swing; this.legs[3].rotation.x = swing;
+    this.legs[1].rotation.x = -swing; this.legs[2].rotation.x = -swing;
+    for (const arm of this.arms) { arm.rotation.x = -Math.PI / 2 + Math.sin(this.animPhase) * 0.12; arm.rotation.z = Math.cos(this.animPhase) * 0.06; }
+    this.head.position.y = this.headBaseY + (moving ? Math.abs(Math.sin(this.animPhase)) * 0.03 : 0);
 
     // despawn zombies in daylight
     if (d.hostile && !isNight && dist > 30) this.dead = true;
 
     this.group.position.copy(this.pos);
-    this.group.rotation.y = this.yaw + Math.PI;
-    // hurt flash
+    // face the way we move/look — front of the model is +z, which maps to the
+    // movement direction (sin yaw, cos yaw) when rotation.y === yaw.
+    this.group.rotation.y = this.yaw;
+    // hurt flash: tint every coloured material red, then restore
     const flash = this.hurtT > 0;
-    this.bodyMat.color.setHex(flash ? 0xff6060 : d.color);
-    this.headMat.color.setHex(flash ? 0xff6060 : d.headColor);
+    this.flashMats.forEach((m, i) => m.color.setHex(flash ? 0xff6060 : this.baseColors[i]));
   }
 
   moveAxis(axis, amt) {
@@ -178,6 +251,28 @@ export class MobManager {
       }
     }
     this.mobs = this.mobs.filter(m => !m.dead);
+  }
+
+  // ranged: nearest mob whose AABB the camera ray pierces within maxDist.
+  // Returns { mob, t } or null. Used by guns (terrain is clipped by the caller).
+  raycastMob(origin, dir, maxDist) {
+    let best = null, bestT = maxDist;
+    for (const m of this.mobs) {
+      if (m.dead) continue;
+      const w = m.def.width / 2;
+      const t = rayAABB(origin, dir,
+        m.pos.x - w, m.pos.y, m.pos.z - w,
+        m.pos.x + w, m.pos.y + m.def.height, m.pos.z + w);
+      if (t !== null && t >= 0 && t < bestT) { bestT = t; best = m; }
+    }
+    return best ? { mob: best, t: bestT } : null;
+  }
+
+  // Apply damage + knockback to a specific mob (shared by gun fire).
+  hitMob(mob, damage, dir, kb = 3) {
+    const killed = mob.hit(damage);
+    mob.vel.x += dir.x * kb; mob.vel.z += dir.z * kb; mob.vel.y = Math.max(mob.vel.y, 4);
+    return killed;
   }
 
   // melee: find closest mob in front of camera within range

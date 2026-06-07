@@ -91,6 +91,24 @@ for (const tname of ['wood', 'stone', 'iron', 'gold', 'diamond']) {
   }
 }
 
+// ---- guns ------------------------------------------------------------------
+function gunIcon(ctx) {
+  ctx.clearRect(0, 0, 32, 32);
+  // body
+  ctx.fillStyle = '#3a3a40'; ctx.fillRect(5, 13, 20, 6);
+  // barrel
+  ctx.fillStyle = '#55555c'; ctx.fillRect(22, 14, 7, 3);
+  // grip
+  ctx.fillStyle = '#2a2a2e'; ctx.save(); ctx.translate(9, 18); ctx.rotate(0.35); ctx.fillRect(0, 0, 6, 11); ctx.restore();
+  // sight + highlight
+  ctx.fillStyle = '#1f1f22'; ctx.fillRect(8, 11, 3, 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(6, 13, 18, 1);
+}
+reg('pistol', {
+  name: 'Pistol', max: 1, draw: gunIcon,
+  gun: { damage: 6, mag: 12, reload: 1.2, fireCD: 0.14, range: 70, spread: 0.012, kb: 4 },
+});
+
 function prettify(s) { return s.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join(' '); }
 
 // ---- crafting recipes ----
