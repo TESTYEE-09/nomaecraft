@@ -97,6 +97,68 @@ armGroup.position.set(0.42, -0.38, -0.55);
 camera.add(armGroup);
 scene.add(camera); // needed so camera children render
 let armSwingT = 0; // continuous swing timer when mining
+
+// First-person gun model (attached to camera, shown when pistol is selected)
+const gunGroup = new THREE.Group();
+const gunMetal = new THREE.MeshLambertMaterial({ color: 0x2a2a2a });
+const gunDark = new THREE.MeshLambertMaterial({ color: 0x1a1a1a });
+const gunGrip = new THREE.MeshLambertMaterial({ color: 0x3d2b1a });
+const gunAccent = new THREE.MeshLambertMaterial({ color: 0x444444 });
+// slide (top part — the main barrel body)
+const slide = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.08, 0.38), gunMetal);
+slide.position.set(0, 0.04, -0.05);
+gunGroup.add(slide);
+// barrel (extends forward from the slide)
+const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.055, 0.08), gunDark);
+barrel.position.set(0, 0.035, -0.27);
+gunGroup.add(barrel);
+// muzzle hole
+const muzzle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.015), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+muzzle.position.set(0, 0.035, -0.315);
+gunGroup.add(muzzle);
+// frame (lower receiver)
+const frame = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.05, 0.24), gunAccent);
+frame.position.set(0, -0.02, -0.01);
+gunGroup.add(frame);
+// trigger guard
+const guard = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.05, 0.08), gunMetal);
+guard.position.set(0, -0.06, -0.04);
+gunGroup.add(guard);
+// trigger
+const trigger = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.035, 0.02), gunAccent);
+trigger.position.set(0, -0.045, -0.04);
+gunGroup.add(trigger);
+// grip (handle, angled slightly back)
+const grip = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.16, 0.09), gunGrip);
+grip.position.set(0, -0.12, 0.06);
+grip.rotation.x = 0.15;
+gunGroup.add(grip);
+// grip texture lines
+for (let i = 0; i < 3; i++) {
+  const line = new THREE.Mesh(new THREE.BoxGeometry(0.092, 0.008, 0.06), gunDark);
+  line.position.set(0, -0.07 - i * 0.035, 0.06);
+  line.rotation.x = 0.15;
+  gunGroup.add(line);
+}
+// rear sight
+const rearSight = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.025, 0.015), gunDark);
+rearSight.position.set(0, 0.09, 0.1);
+gunGroup.add(rearSight);
+// front sight
+const frontSight = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.025, 0.015), gunDark);
+frontSight.position.set(0, 0.09, -0.2);
+gunGroup.add(frontSight);
+// magazine base plate (visible at bottom of grip)
+const magBase = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.015, 0.07), gunMetal);
+magBase.position.set(0, -0.205, 0.075);
+magBase.rotation.x = 0.15;
+gunGroup.add(magBase);
+
+gunGroup.position.set(0.38, -0.32, -0.52);
+gunGroup.rotation.set(0, 0, 0);
+gunGroup.visible = false;
+camera.add(gunGroup);
+let gunRecoilT = 0; // recoil animation timer
 function applyCrackStage(stage) {
   if (!atlas.crackUVs || atlas.crackUVs.length === 0) return;
   const cu = atlas.crackUVs[stage] || atlas.crackUVs[atlas.crackUVs.length - 1];
@@ -1197,20 +1259,41 @@ function loop(now) {
   // underwater overlay
   document.getElementById('underwater').classList.toggle('show', player.headInWater());
 
-  // first-person arm animation
-  if (attackAnim > 0) {
-    // quick swing from attack/place: rotate forward
-    const t = 1 - (attackAnim / 0.25);
-    armGroup.rotation.x = -1.2 * (1 - t * t); // swing forward and snap back
-    armSwingT = 0;
-  } else if (mining && !isGunSelected() && currentTarget) {
-    // continuous mining swing: oscillate
-    armSwingT += dt * 7;
-    armGroup.rotation.x = Math.sin(armSwingT) * 0.7;
+  // first-person arm + gun model
+  const gunOut = isGunSelected();
+  armGroup.visible = !gunOut;
+  gunGroup.visible = gunOut;
+
+  if (gunOut) {
+    // gun recoil animation
+    if (attackAnim > 0) {
+      const t = attackAnim / 0.1;
+      gunGroup.rotation.x = -0.35 * t * t;          // kick up
+      gunGroup.position.z = -0.52 + 0.06 * t;       // kick back
+      gunGroup.position.y = -0.32 + 0.03 * t;       // rise
+    } else {
+      // ease back to rest
+      gunGroup.rotation.x *= 0.82;
+      gunGroup.position.z += (-0.52 - gunGroup.position.z) * 0.15;
+      gunGroup.position.y += (-0.32 - gunGroup.position.y) * 0.15;
+    }
+    // gentle idle sway
+    const sway = performance.now() * 0.001;
+    gunGroup.rotation.z = Math.sin(sway * 1.1) * 0.008;
+    gunGroup.rotation.y = Math.sin(sway * 0.9) * 0.005;
   } else {
-    // idle: gentle bob
-    armGroup.rotation.x *= 0.85; // ease back to rest
-    armSwingT = 0;
+    // arm animation
+    if (attackAnim > 0) {
+      const t = 1 - (attackAnim / 0.25);
+      armGroup.rotation.x = -1.2 * (1 - t * t);
+      armSwingT = 0;
+    } else if (mining && currentTarget) {
+      armSwingT += dt * 7;
+      armGroup.rotation.x = Math.sin(armSwingT) * 0.7;
+    } else {
+      armGroup.rotation.x *= 0.85;
+      armSwingT = 0;
+    }
   }
 
   renderer.render(scene, camera);
