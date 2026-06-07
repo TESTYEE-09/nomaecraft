@@ -80,6 +80,23 @@ crackPlane.visible = false;
 crackPlane.renderOrder = 999;
 scene.add(crackPlane);
 let currentCrackStage = -1; // tracks last-applied stage so we only swap UVs on change
+
+// First-person arm mesh (attached to camera)
+const armGroup = new THREE.Group();
+const armSkin = 0xd4a574;
+const armMat = new THREE.MeshLambertMaterial({ color: armSkin });
+// forearm
+const armMesh = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.55, 0.18), armMat);
+armMesh.position.set(0, -0.12, 0);
+armGroup.add(armMesh);
+// hand (slightly wider block at the end)
+const handMesh = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.12, 0.2), armMat);
+handMesh.position.set(0, -0.42, 0);
+armGroup.add(handMesh);
+armGroup.position.set(0.42, -0.38, -0.55);
+camera.add(armGroup);
+scene.add(camera); // needed so camera children render
+let armSwingT = 0; // continuous swing timer when mining
 function applyCrackStage(stage) {
   if (!atlas.crackUVs || atlas.crackUVs.length === 0) return;
   const cu = atlas.crackUVs[stage] || atlas.crackUVs[atlas.crackUVs.length - 1];
@@ -1048,6 +1065,22 @@ function loop(now) {
 
   // keep the crack overlay billboard-facing the camera (cheap, no allocation)
   if (crackPlane.visible) crackPlane.lookAt(camera.position);
+
+  // first-person arm animation
+  if (attackAnim > 0) {
+    // quick swing from attack/place: rotate forward
+    const t = 1 - (attackAnim / 0.25);
+    armGroup.rotation.x = -1.2 * (1 - t * t); // swing forward and snap back
+    armSwingT = 0;
+  } else if (mining && !isGunSelected() && currentTarget) {
+    // continuous mining swing: oscillate
+    armSwingT += dt * 7;
+    armGroup.rotation.x = Math.sin(armSwingT) * 0.7;
+  } else {
+    // idle: gentle bob
+    armGroup.rotation.x *= 0.85; // ease back to rest
+    armSwingT = 0;
+  }
 
   renderer.render(scene, camera);
 }
