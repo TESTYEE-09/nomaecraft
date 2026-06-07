@@ -5,7 +5,7 @@ import { Player } from './player.js';
 import { Inventory, matchRecipe } from './inventory.js';
 import { ITEMS } from './items.js';
 import { MobManager } from './mobs.js';
-import { Net, randomRoom } from './multiplayer.js';
+import { Net } from './multiplayer.js';
 import { RemotePlayer } from './remoteplayer.js';
 
 // ---------------------------------------------------------------------------
@@ -17,13 +17,14 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.1, 1000);
-const RENDER_DIST = 5; // chunks
+const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.1, 2000);
+const RENDER_DIST = 9; // chunks
+const SHARED_SEED = 20260607; // fixed seed for the global world so terrain is always consistent
 
 const DAY_BLUE = new THREE.Color(0x87ceeb);
 const NIGHT_BLUE = new THREE.Color(0x0a0e1a);
 const SUNSET = new THREE.Color(0xff9d5c);
-scene.fog = new THREE.Fog(DAY_BLUE.getHex(), CHUNK * (RENDER_DIST - 1), CHUNK * (RENDER_DIST + 0.5));
+scene.fog = new THREE.Fog(DAY_BLUE.getHex(), CHUNK * (RENDER_DIST - 2.5), CHUNK * (RENDER_DIST + 0.5));
 
 const hemi = new THREE.HemisphereLight(0xffffff, 0x555555, 0.6);
 scene.add(hemi);
@@ -52,6 +53,19 @@ const remotePlayers = new Map(); // peerId -> RemotePlayer
 const torchSet = new Set();      // "x,y,z"
 const torchPool = [];
 for (let i = 0; i < 16; i++) { const l = new THREE.PointLight(0xffb24d, 0, 9, 2); l.visible = false; scene.add(l); torchPool.push(l); }
+
+// block selection highlight (wireframe) + breaking overlay
+const highlightBox = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(1.002, 1.002, 1.002)),
+  new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.5, depthTest: true })
+);
+highlightBox.visible = false; scene.add(highlightBox);
+const breakBox = new THREE.Mesh(
+  new THREE.BoxGeometry(1.01, 1.01, 1.01),
+  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0, depthWrite: false })
+);
+breakBox.visible = false; scene.add(breakBox);
+let currentTarget = null; // {hit, place, block} from per-frame raycast
 
 // ---------------------------------------------------------------------------
 // Input
@@ -189,7 +203,7 @@ function breakTime(blockId, tool) {
   const d = blockDefs[blockId];
   let hardness = d.hardness;
   const correct = tool.type === d.tool && tool.type !== TOOL.HAND;
-  let t = correct ? hardness * 1.5 / tool.mult : hardness * 3.0;
+  let t = correct ? hardness * 1.5 / tool.mult : hardness * 1.8;
   return Math.max(0.05, t);
 }
 
@@ -220,24 +234,35 @@ function setBlockShared(x, y, z, b, broadcast = true) {
   if (broadcast && multiplayer && net) net.sendBlock(x, y, z, b);
 }
 
-function mineUpdate(dt) {
-  if (!mining) return;
+// recompute the block the player is aiming at, and update the highlight box
+function updateTarget() {
   const origin = camera.position;
   const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
-  const hit = world.raycast(origin, dir, 6);
-  if (!hit) { breakTarget = null; breakProgress = 0; return; }
+  currentTarget = world.raycast(origin, dir, 6);
+  if (currentTarget) {
+    const h = currentTarget.hit;
+    highlightBox.position.set(h.x + 0.5, h.y + 0.5, h.z + 0.5);
+    highlightBox.visible = true;
+  } else { highlightBox.visible = false; }
+}
+
+function mineUpdate(dt) {
+  if (!mining || !currentTarget) { breakBox.visible = false; if (!mining) { breakTarget = null; breakProgress = 0; } return; }
+  const hit = currentTarget;
   const d = blockDefs[hit.block];
-  if (d.unbreakable) { breakTarget = null; return; }
+  if (d.unbreakable) { breakTarget = null; breakBox.visible = false; return; }
   const key = hit.hit.x + ',' + hit.hit.y + ',' + hit.hit.z;
   if (key !== breakTarget) { breakTarget = key; breakProgress = 0; }
   const tool = selectedTool();
   breakProgress += dt / breakTime(hit.block, tool);
+  // breaking overlay darkens as it progresses
+  breakBox.position.set(hit.hit.x + 0.5, hit.hit.y + 0.5, hit.hit.z + 0.5);
+  breakBox.material.opacity = Math.min(0.6, breakProgress * 0.6);
+  breakBox.visible = true;
   if (breakProgress >= 1) {
-    breakProgress = 0; breakTarget = null;
-    // drops
+    breakProgress = 0; breakTarget = null; breakBox.visible = false;
     for (const [id, n] of dropsFor(hit.block, tool)) inventory.add(id, n);
     setBlockShared(hit.hit.x, hit.hit.y, hit.hit.z, BLOCK.AIR);
-    // tool durability
     if (tool.item && tool.type !== TOOL.HAND) {
       tool.item.dura = (tool.item.dura ?? ITEMS[tool.item.id].tool.dura) - 1;
       if (tool.item.dura <= 0) inventory.removeSelected(1);
@@ -262,10 +287,7 @@ function useItem() {
     }
     return;
   }
-  // open crafting table
-  const origin = camera.position; const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
-  const hit = world.raycast(origin, dir, 6);
-  if (hit && hit.block === BLOCK.CRAFTING_TABLE && def.block === undefined) { return; }
+  const hit = currentTarget;
   // place block
   if (def.block !== undefined && hit) {
     const p = hit.place;
@@ -522,17 +544,21 @@ function rebuildWorld(seed) {
 function startGame() {
   document.getElementById('menu').classList.add('hidden');
   document.getElementById('loading').classList.remove('hidden');
-  // pre-generate spawn chunks
+  document.getElementById('loading-text').textContent = 'Generating world…';
+  // pre-generate + mesh the spawn area so there's solid ground under you immediately
   setTimeout(() => {
-    world.update(player.pos.x, player.pos.z, RENDER_DIST);
+    const ccx = Math.floor(player.pos.x / CHUNK), ccz = Math.floor(player.pos.z / CHUNK);
+    const PRE = 6;
+    for (let dz = -PRE; dz <= PRE; dz++) for (let dx = -PRE; dx <= PRE; dx++) world.getChunk(ccx + dx, ccz + dz); // data pass
+    for (let dz = -PRE; dz <= PRE; dz++) for (let dx = -PRE; dx <= PRE; dx++) { const c = world.chunks.get((ccx + dx) + ',' + (ccz + dz)); if (c) world.buildMesh(c); } // mesh pass
     player.setSpawnToSurface();
     document.getElementById('loading').classList.add('hidden');
     hud.classList.remove('hidden');
     paused = false;
     renderHotbar();
     canvas.requestPointerLock();
-    addChat('system', multiplayer ? 'Connected! Press T to chat.' : 'Welcome! Press E for inventory, F to fly.');
-  }, 60);
+    addChat('system', multiplayer ? 'You are in the shared world! Press T to chat, E for inventory.' : 'Welcome! Left-click to mine, E for inventory, F to fly.');
+  }, 80);
 }
 
 function onDeath() {
@@ -595,45 +621,18 @@ document.getElementById('btn-single').onclick = () => {
   startGame();
 };
 
-document.getElementById('btn-host').onclick = async () => {
+document.getElementById('btn-online').onclick = async () => {
   readName();
-  netStatus.textContent = 'Creating room…';
+  netStatus.textContent = 'Connecting to the shared world…';
   multiplayer = true;
-  rebuildWorld((Math.random() * 1e9) | 0);
-  net = new Net(netHandlers());
-  const code = randomRoom();
-  try {
-    await net.host(code);
-    netStatus.innerHTML = `Room created! Share this code: <b style="font-size:18px;letter-spacing:2px">${code}</b>`;
-    const url = location.origin + location.pathname + '#' + code;
-    shareNote.innerHTML = `Friends can join with the code, or this link:<br><b>${url}</b>`;
-    try { await navigator.clipboard.writeText(url); shareNote.innerHTML += '<br>(link copied to clipboard)'; } catch {}
-    setTimeout(startGame, 800);
-  } catch (e) { netStatus.textContent = 'Error: ' + e.message; multiplayer = false; }
-};
-
-async function doJoin(code) {
-  readName();
-  code = code.trim().toUpperCase();
-  if (!code) { netStatus.textContent = 'Enter a room code.'; return; }
-  netStatus.textContent = 'Connecting to ' + code + '…';
-  multiplayer = true;
-  rebuildWorld(1337); // temporary; replaced by host's seed on init
+  rebuildWorld(SHARED_SEED); // everyone uses the same fixed-seed terrain
   net = new Net(netHandlers());
   try {
-    await net.join(code);
-    netStatus.textContent = 'Connected!';
+    const role = await net.connectShared('MAIN');
+    netStatus.textContent = role === 'hosting' ? 'You opened the shared world — friends can join now!' : 'Connected to the shared world!';
     setTimeout(startGame, 400);
-  } catch (e) { netStatus.textContent = 'Error: ' + e.message; multiplayer = false; }
-}
-document.getElementById('btn-join').onclick = () => doJoin(document.getElementById('room-input').value);
-
-// auto-fill room code from URL hash (#CODE) so shared links prefill join
-if (location.hash.length > 1) {
-  const code = location.hash.slice(1).toUpperCase();
-  document.getElementById('room-input').value = code;
-  netStatus.textContent = 'Room code filled from link — press Join (after entering your name).';
-}
+  } catch (e) { netStatus.textContent = 'Error: ' + e.message + ' (try again)'; multiplayer = false; }
+};
 
 // ---------------------------------------------------------------------------
 // Main loop
@@ -647,9 +646,10 @@ function loop(now) {
   if (!invOpen) {
     player.update(dt, input);
     eatCD = Math.max(0, eatCD - dt); placeCD = Math.max(0, placeCD - dt); attackAnim = Math.max(0, attackAnim - dt);
+    updateTarget();
     mineUpdate(dt);
     if (placing) useItem();
-  }
+  } else { highlightBox.visible = false; breakBox.visible = false; }
 
   dayTime += dt;
   world.update(player.pos.x, player.pos.z, RENDER_DIST);
@@ -673,4 +673,9 @@ window.nomae = {
   time: (phase) => { dayTime = phase * DAY_LEN; return 'time set'; },
   tp: (x, y, z) => { player.pos.set(x, y, z); return 'tp'; },
   heal: () => { player.health = 20; player.hunger = 20; return 'healed'; },
+  aim: () => currentTarget && { block: currentTarget.block, at: currentTarget.hit },
+  pos: () => [player.pos.x.toFixed(1), player.pos.y.toFixed(1), player.pos.z.toFixed(1)],
+  block: (x, y, z) => world.getBlock(x, y, z),
+  look: (pitch, yaw) => { player.pitch = pitch; if (yaw !== undefined) player.yaw = yaw; return 'looking'; },
+  mineAimed: () => { if (!currentTarget) return 'no block in view'; const t = selectedTool(); const drops = dropsFor(currentTarget.block, t); for (const [id, n] of drops) inventory.add(id, n); const b = currentTarget.block; setBlockShared(currentTarget.hit.x, currentTarget.hit.y, currentTarget.hit.z, BLOCK.AIR); renderHotbar(); return { mined: b, got: drops }; },
 };

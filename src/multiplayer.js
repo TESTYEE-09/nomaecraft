@@ -21,6 +21,49 @@ export class Net {
     return id ? new Peer(id, { debug: 1 }) : new Peer(undefined, { debug: 1 });
   }
 
+  // Connect to the single global world. Tries to join the existing host; if there
+  // is none, becomes the host. Survives host changes via _migrate().
+  async connectShared(room = 'MAIN') {
+    this.room = room;
+    this._shared = true;
+    return this._tryConnect(room);
+  }
+
+  async _tryConnect(room) {
+    try {
+      await this.join(room);
+      return 'joined';
+    } catch (e) {
+      this.close();
+      try {
+        await this.host(room);
+        return 'hosting';
+      } catch (e2) {
+        // lost the race to host — wait, then join the winner
+        this.close();
+        await new Promise(r => setTimeout(r, 600 + Math.random() * 900));
+        await this.join(room);
+        return 'joined';
+      }
+    }
+  }
+
+  _migrate() {
+    if (this._migrating || !this._shared) return;
+    this._migrating = true;
+    this.h.onChat('system', 'Host left — reconnecting to the shared world…');
+    this.close();
+    setTimeout(async () => {
+      this._migrating = false;
+      try {
+        const r = await this._tryConnect(this.room);
+        this.h.onChat('system', r === 'hosting' ? 'You are now hosting the shared world.' : 'Reconnected to the shared world.');
+      } catch (e) {
+        this.h.onChat('system', 'Lost connection. Refresh to rejoin.');
+      }
+    }, 300 + Math.random() * 1400);
+  }
+
   host(roomCode) {
     return new Promise((resolve, reject) => {
       this.isHost = true;
@@ -78,7 +121,7 @@ export class Net {
           else this._clientHandle(msg);
         });
         conn.on('error', (e) => { if (!done) reject(new Error('Could not reach host. Check the room code.')); });
-        conn.on('close', () => { this.connected = false; this.h.onChat('system', 'Disconnected from host.'); });
+        conn.on('close', () => { this.connected = false; if (this._shared) this._migrate(); else this.h.onChat('system', 'Disconnected from host.'); });
         // timeout
         setTimeout(() => { if (!done) reject(new Error('Connection timed out. Is the host online?')); }, 12000);
       });

@@ -4,7 +4,9 @@ A browser-based **multiplayer voxel sandbox** — a Minecraft clone you can play
 
 ### ▶️ Play now: **https://testyee-09.github.io/nomaecraft/**
 
-Share that link with friends. To play together, one person clicks **Host a World**, gets a 5-letter room code (and a shareable link), and everyone else types the code (or opens the link) and clicks **Join**.
+Share that link with friends. To play together, everyone just clicks **🌐 Play Online — join the shared world**. No room codes: you all land in the *same* persistent world automatically and can build together and chat (**T**).
+
+> The shared world uses a fixed seed (so the terrain is always identical for everyone) and runs peer-to-peer over WebRTC — the first player online hosts it, and hosting hands off automatically if they leave. It stays alive as long as at least one person is playing.
 
 ---
 
@@ -18,7 +20,9 @@ Share that link with friends. To play together, one person clicks **Host a World
 - **Day/night cycle** — a moving sun & moon, dynamic sky colors, sunsets, and fog.
 - **Mobs** — passive pigs & cows (drop meat) and **zombies** that spawn in the dark and hunt you. Fight back with swords; mobs have knockback and drops.
 - **Torches** that cast real light in caves and at night.
-- **Multiplayer** — peer-to-peer over WebRTC. Player avatars with name tags, synced block edits, and live chat. No game server needed.
+- **Multiplayer** — one shared world, no codes. Peer-to-peer over WebRTC with automatic host migration. Player avatars with name tags, synced block edits, and live chat. No game server needed.
+- **Mining feedback** — targeted blocks are outlined and darken as they break; mining speed scales with your tool.
+- **Big view distance** with a dense, clumped forest of trees.
 - **Auto-save** — singleplayer worlds persist in your browser.
 
 ## Controls

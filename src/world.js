@@ -67,16 +67,23 @@ export class World {
           else if (y <= SEA) b = BLOCK.WATER;
           data[idx(lx, y, lz)] = b;
         }
-        // trees on grass above sea
-        if (top === BLOCK.GRASS && h > SEA + 1) {
-          const t = this.treeNoise.noise2(wx * 0.9, wz * 0.9);
-          if (t > 0.94 && lx > 1 && lx < CHUNK - 2 && lz > 1 && lz < CHUNK - 2) {
-            this.placeTree(data, lx, h + 1, lz);
-          }
+        // trees on grass above sea — clumped into forest regions so they look natural
+        if (top === BLOCK.GRASS && h > SEA + 1 && lx > 1 && lx < CHUNK - 2 && lz > 1 && lz < CHUNK - 2) {
+          const forest = this.treeNoise.fbm(wx * 0.012, wz * 0.012, 2); // -1..1, large regions
+          const thresh = forest > 0.15 ? 0.86 : (forest > -0.1 ? 0.94 : 0.985);
+          if (this.hash(wx, wz) > thresh) this.placeTree(data, lx, h + 1, lz);
         }
       }
     }
     return data;
+  }
+
+  // deterministic per-column pseudo-random in [0,1)
+  hash(x, z) {
+    let h = (x * 374761393 + z * 668265263) ^ this.seed;
+    h = (h ^ (h >> 13)) * 1274126177;
+    h = h ^ (h >> 16);
+    return ((h >>> 0) % 100000) / 100000;
   }
 
   placeTree(data, x, y, z) {
@@ -244,13 +251,13 @@ export class World {
     need.sort((a, b) => a[2] - b[2]);
     let gen = 0;
     for (const [cx, cz] of need) {
-      if (!this.chunks.has(key(cx, cz))) { this.getChunk(cx, cz); gen++; if (gen >= 2) break; }
+      if (!this.chunks.has(key(cx, cz))) { this.getChunk(cx, cz); gen++; if (gen >= 4) break; }
     }
     // rebuild a few dirty chunks per frame
     let built = 0;
     for (const [cx, cz] of need) {
       const c = this.chunks.get(key(cx, cz));
-      if (c && c.dirty) { this.buildMesh(c); if (++built >= 3) break; }
+      if (c && c.dirty) { this.buildMesh(c); if (++built >= 5) break; }
     }
     // unload far chunks
     for (const [k, c] of this.chunks) {

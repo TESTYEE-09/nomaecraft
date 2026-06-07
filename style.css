@@ -69,6 +69,8 @@ button { cursor: pointer; }
 .join-row input { flex: 1; margin: 0; }
 .join-row button { width: auto; padding: 9px 18px; margin: 0; background: #3f7fab; box-shadow: 0 4px 0 #245270; }
 .net-status { font-size: 13px; min-height: 18px; margin-top: 6px; color: #ffd86b; word-break: break-word; }
+.online-note { font-size: 12px; opacity: 0.7; margin-top: 8px; line-height: 1.5; }
+.online-note b { color: #ffd86b; }
 .help { margin-top: 14px; text-align: left; font-size: 12px; }
 .help summary { cursor: pointer; opacity: 0.8; margin-bottom: 6px; }
 .help ul { padding-left: 18px; line-height: 1.7; opacity: 0.85; }
