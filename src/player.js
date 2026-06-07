@@ -27,9 +27,19 @@ export class Player {
 
   setSpawnToSurface() {
     const w = this.world;
-    let y = 60;
-    while (y > 1 && w.getBlock(8, y, 8) === BLOCK.AIR) y--;
-    this.pos.set(8.5, y + 2, 8.5);
+    // Make sure the spawn column's chunk actually exists before scanning —
+    // otherwise getBlock() returns AIR for every Y and we'd "spawn" at y≈1,
+    // burying the player under the world.
+    if (w.getChunk) w.getChunk(0, 0);
+    // Scan from the top down for the first solid block, skipping water.
+    let y = 62;
+    while (y > 1) {
+      const b = w.getBlock(8, y, 8);
+      if (b !== BLOCK.AIR && b !== BLOCK.WATER) break;
+      y--;
+    }
+    // y is now the top solid block; stand the player just above it.
+    this.pos.set(8.5, y + 1.2, 8.5);
     this.spawn.copy(this.pos);
   }
 
