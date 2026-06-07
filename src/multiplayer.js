@@ -1,24 +1,43 @@
-// Peer-to-peer multiplayer over WebRTC using PeerJS's free public broker.
-// Topology: a star. One player hosts (peer id = room code). Clients connect to the
-// host; the host relays every message to all other clients, tagging the sender.
-// No backend of our own — works from static hosting like GitHub Pages.
+// Peer-to-peer multiplayer over WebRTC using a self-hosted PeerJS server
+// with fallback to the free public broker. Topology: a star. One player
+// hosts (peer id = room code). Clients connect to the host; the host relays
+// every message to all other clients, tagging the sender.
 
 const PREFIX = 'nomaecraft-';
 
+// Signal servers — tried in order. First is our own Render deploy.
+const SIGNAL_SERVERS = [
+  { host: 'nomaecraft-signal.onrender.com', port: 443, secure: true, path: '/' },
+  { host: '0.peerjs.com', port: 443, secure: true, path: '/' },
+];
+
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+];
+
 export class Net {
   constructor(handlers) {
-    this.h = handlers;            // { onInit, onPlayer, onRemovePlayer, onBlock, onChat, getSeed, getEdits }
+    this.h = handlers;
     this.isHost = false;
     this.peer = null;
-    this.conns = new Map();       // peerId -> DataConnection
+    this.conns = new Map();
     this.room = null;
     this.myId = 'p' + Math.random().toString(36).slice(2, 8);
     this.connected = false;
+    this._serverIdx = 0;
   }
 
   _newPeer(id) {
-    // PeerJS global from CDN
-    return id ? new Peer(id, { debug: 1 }) : new Peer(undefined, { debug: 1 });
+    const srv = SIGNAL_SERVERS[this._serverIdx] || SIGNAL_SERVERS[0];
+    const opts = {
+      host: srv.host, port: srv.port, secure: srv.secure, path: srv.path,
+      debug: 1,
+      config: { iceServers: ICE_SERVERS },
+    };
+    return id ? new Peer(id, opts) : new Peer(undefined, opts);
   }
 
   // Connect to the single global world. Tries to join the existing host; if there
@@ -29,29 +48,33 @@ export class Net {
     return this._tryConnect(room);
   }
 
-  async _tryConnect(room, retries = 3) {
-    for (let attempt = 0; attempt < retries; attempt++) {
-      try {
-        await this.join(room);
-        return 'joined';
-      } catch (e) {
-        this.close();
+  async _tryConnect(room) {
+    for (let si = 0; si < SIGNAL_SERVERS.length; si++) {
+      this._serverIdx = si;
+      const srvName = SIGNAL_SERVERS[si].host;
+      this._log('Trying server: ' + srvName);
+      for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          await this.host(room);
-          return 'hosting';
-        } catch (e2) {
+          await this.join(room);
+          this._log('Joined via ' + srvName);
+          return 'joined';
+        } catch (e) {
           this.close();
-          if (attempt < retries - 1) {
-            await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
+          try {
+            await this.host(room);
+            this._log('Hosting via ' + srvName);
+            return 'hosting';
+          } catch (e2) {
+            this.close();
+            await new Promise(r => setTimeout(r, 500 + Math.random() * 800));
           }
         }
       }
     }
-    // final attempt
-    await new Promise(r => setTimeout(r, 500 + Math.random() * 1000));
-    await this.join(room);
-    return 'joined';
+    throw new Error('Could not connect to any signal server. Try refreshing.');
   }
+
+  _log(msg) { console.log('[Net]', msg); }
 
   _migrate() {
     if (this._migrating || !this._shared) return;
@@ -114,23 +137,25 @@ export class Net {
     return new Promise((resolve, reject) => {
       this.isHost = false;
       this.room = roomCode;
+      let done = false;
+      const fail = (msg) => { if (!done) { done = true; reject(new Error(msg)); } };
       this.peer = this._newPeer(null);
       this.peer.on('open', (myid) => {
         this.myId = myid;
         const conn = this.peer.connect(PREFIX + roomCode, { reliable: true });
         this.host_conn = conn;
-        let done = false;
         conn.on('open', () => { this.connected = true; });
         conn.on('data', (msg) => {
           if (msg.t === 'init') { this.h.onInit(msg.seed, msg.edits); this.hostId = msg.hostId; if (!done) { done = true; resolve(roomCode); } }
           else this._clientHandle(msg);
         });
-        conn.on('error', (e) => { if (!done) reject(new Error('Could not reach host. Check the room code.')); });
+        conn.on('error', () => fail('Could not reach host.'));
         conn.on('close', () => { this.connected = false; if (this._shared) this._migrate(); else this.h.onChat('system', 'Disconnected from host.'); });
-        // timeout
-        setTimeout(() => { if (!done) reject(new Error('Connection timed out. Is the host online?')); }, 12000);
+        setTimeout(() => fail('Connection timed out.'), 8000);
       });
-      this.peer.on('error', (e) => { if (!done) { done = true; reject(new Error(e.type === 'peer-unavailable' ? 'No host found for that room code.' : 'Connection error: ' + (e.type || e.message))); } });
+      this.peer.on('error', (e) => fail(e.type === 'peer-unavailable' ? 'No host found.' : 'Signal error: ' + (e.type || e.message)));
+      // if the peer itself can't connect to the signal server, fail fast
+      setTimeout(() => fail('Signal server unreachable.'), 6000);
     });
   }
 

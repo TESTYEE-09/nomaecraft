@@ -23,6 +23,9 @@ export class Player {
     this.fallStart = null;
     this._regenT = 0; this._starveT = 0; this._hungerT = 0;
     this.spawn = new THREE.Vector3(8, 50, 8);
+    this.walkPhase = 0;
+    this.walkBob = 0;
+    this.walkTilt = 0;
   }
 
   setSpawnToSurface() {

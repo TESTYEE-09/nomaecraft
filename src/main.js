@@ -537,11 +537,9 @@ function makeUISlot(getItem, onMouseDown, onMouseUp, extraClass = '') {
   div.className = 'slot ' + extraClass;
   const s = getItem();
   if (s) div.appendChild(slotInner(s));
-  // Drag-and-drop support. mousedown picks up (or arms a swap), mousemove
-  // tracks the cursor with the held icon, mouseup drops on a target slot.
-  // Click-based pick/place still works for non-drag users.
+  div.addEventListener('contextmenu', (e) => e.preventDefault());
   div.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 && e.button !== 2) return;
     e.preventDefault();
     onMouseDown(e, div);
   });
@@ -630,11 +628,16 @@ let heldSrc = null;      // 'craft' | 'inv' — where the held item came from
 let heldSrcI = -1;
 let dragMoved = false;   // did the cursor travel far enough to be a drag?
 let dragStartX = 0, dragStartY = 0;
+let dragButton = 0;      // 0 = left, 2 = right
 const DRAG_THRESHOLD = 4; // px
+
+// right-click drag distribute state
+let distributing = false;
+let distribSlots = [];     // [{kind, i}] slots visited during right-drag
+let distribSnap = null;    // snapshot of held count at drag start
 
 function slotsOf(kind) { return kind === 'craft' ? craftSlots : inventory.slots; }
 
-// Pick the item out of (kind,i) onto the cursor. No-op on an empty slot.
 function pickUp(kind, i) {
   const arr = slotsOf(kind);
   if (!arr[i]) return;
@@ -642,24 +645,52 @@ function pickUp(kind, i) {
   heldSrc = kind; heldSrcI = i;
 }
 
-// Commit the held item into (kind,i): fill if empty, stack if same id,
-// otherwise swap (the displaced item stays on the cursor).
+// Pick up half (round up) of a stack, leaving the rest.
+function pickUpHalf(kind, i) {
+  const arr = slotsOf(kind);
+  if (!arr[i]) return;
+  const s = arr[i];
+  const take = Math.ceil(s.count / 2);
+  held = { id: s.id, count: take };
+  if (s.dura !== undefined) held.dura = s.dura;
+  s.count -= take;
+  if (s.count <= 0) arr[i] = null;
+  heldSrc = kind; heldSrcI = i;
+}
+
+// Place one item from the held stack into (kind,i). Returns true if placed.
+function placeOne(kind, i) {
+  if (!held) return false;
+  const arr = slotsOf(kind);
+  const target = arr[i];
+  if (!target) {
+    arr[i] = { id: held.id, count: 1 };
+    if (held.dura !== undefined) arr[i].dura = held.dura;
+    held.count--;
+    if (held.count <= 0) held = null;
+    return true;
+  } else if (target.id === held.id) {
+    const max = ITEMS[target.id]?.max ?? 64;
+    if (target.count < max) { target.count++; held.count--; if (held.count <= 0) held = null; return true; }
+  }
+  return false;
+}
+
 function dropHeldInto(kind, i) {
   if (!held) return;
   const arr = slotsOf(kind);
   const target = arr[i];
   if (!target) { arr[i] = held; held = null; }
   else if (target.id === held.id) {
-    const max = ITEMS[target.id].max;
+    const max = ITEMS[target.id]?.max ?? 64;
     const add = Math.min(held.count, max - target.count);
     target.count += add; held.count -= add;
-    if (held.count <= 0) held = null; // fully merged; leftover (if any) stays held
+    if (held.count <= 0) held = null;
   } else {
-    arr[i] = held; held = target; heldSrc = kind; heldSrcI = i; // swap
+    arr[i] = held; held = target; heldSrc = kind; heldSrcI = i;
   }
 }
 
-// Put whatever is on the cursor back where it came from (or anywhere free).
 function returnHeld() {
   if (!held) return;
   const arr = slotsOf(heldSrc);
@@ -668,34 +699,127 @@ function returnHeld() {
   held = null;
 }
 
-// mousedown on a slot: place the held item (click-to-place) or pick this one
-// up (click-to-pick / start of a drag). The actual drag drop is finalized in
-// the document-level mouseup so it works wherever the cursor is released.
+// Redistribute held items evenly across distribSlots (left-drag distribute).
+function redistributeLeftDrag() {
+  if (!held || distribSlots.length === 0) return;
+  const total = held.count;
+  const perSlot = Math.floor(total / distribSlots.length);
+  if (perSlot < 1) return;
+  let placed = 0;
+  for (const { kind, i } of distribSlots) {
+    const arr = slotsOf(kind);
+    const target = arr[i];
+    if (!target) {
+      arr[i] = { id: held.id, count: perSlot };
+      if (held.dura !== undefined) arr[i].dura = held.dura;
+      placed += perSlot;
+    } else if (target.id === held.id) {
+      const max = ITEMS[target.id]?.max ?? 64;
+      const add = Math.min(perSlot, max - target.count);
+      target.count += add;
+      placed += add;
+    }
+  }
+  held.count = total - placed;
+  if (held.count <= 0) held = null;
+}
+
 function slotMouseDown(kind, i, e) {
   dragStartX = e.clientX; dragStartY = e.clientY; dragMoved = false;
-  if (held) dropHeldInto(kind, i);
-  else pickUp(kind, i);
+  dragButton = e.button;
+
+  if (e.button === 2) {
+    // Right-click: place one or pick up half
+    if (held) {
+      placeOne(kind, i);
+      // start right-drag distribute mode
+      distributing = true;
+      distribSlots = [{ kind, i }];
+    } else {
+      pickUpHalf(kind, i);
+    }
+  } else {
+    // Left-click: normal pick/place
+    if (held) {
+      // start left-drag distribute mode
+      distributing = true;
+      distribSlots = [];
+      distribSnap = held.count;
+      // don't drop immediately on mousedown for left — distribute on drag
+      const arr = slotsOf(kind);
+      const target = arr[i];
+      if (!target || target.id === held.id) {
+        distribSlots.push({ kind, i });
+      } else {
+        dropHeldInto(kind, i);
+        distributing = false;
+      }
+    } else {
+      pickUp(kind, i);
+    }
+  }
+  renderInventoryUI();
+}
+
+// track slot entry during drag
+function onDragEnterSlot(e) {
+  if (!distributing || !held || !invOpen) return;
+  const target = findTargetSlot(e);
+  if (!target || target.kind === 'out') return;
+  const already = distribSlots.some(s => s.kind === target.kind && s.i === target.i);
+  if (already) return;
+  const arr = slotsOf(target.kind);
+  const slot = arr[target.i];
+  // only distribute into empty slots or same-id slots
+  if (slot && slot.id !== held.id) return;
+  distribSlots.push(target);
+
+  if (dragButton === 2) {
+    // right-drag: place one per slot immediately
+    placeOne(target.kind, target.i);
+  }
+  // left-drag redistribute is done on mouseup
   renderInventoryUI();
 }
 
 document.addEventListener('mousemove', (e) => {
-  if (!held || !invOpen) return;
-  if (!dragMoved) {
-    const dx = e.clientX - dragStartX, dy = e.clientY - dragStartY;
-    if (dx * dx + dy * dy > DRAG_THRESHOLD * DRAG_THRESHOLD) dragMoved = true;
+  if (!invOpen) return;
+  if (held) {
+    if (!dragMoved) {
+      const dx = e.clientX - dragStartX, dy = e.clientY - dragStartY;
+      if (dx * dx + dy * dy > DRAG_THRESHOLD * DRAG_THRESHOLD) dragMoved = true;
+    }
+    if (heldEl) { heldEl.style.left = (e.clientX - 19) + 'px'; heldEl.style.top = (e.clientY - 19) + 'px'; }
+    if (dragMoved && distributing) onDragEnterSlot(e);
   }
-  if (heldEl) { heldEl.style.left = (e.clientX - 19) + 'px'; heldEl.style.top = (e.clientY - 19) + 'px'; }
 });
 document.addEventListener('mouseup', (e) => {
+  if (e.button === 2) {
+    // right-drag finished
+    distributing = false;
+    distribSlots = [];
+    renderInventoryUI();
+    renderHotbar();
+    return;
+  }
   if (e.button !== 0) return;
-  // Only finalize on a genuine drag; a plain click was already handled on
-  // mousedown, and leaves the item on the cursor for click-to-move.
-  if (dragMoved && held) {
+  if (distributing && dragMoved && held) {
+    redistributeLeftDrag();
+    distributing = false;
+    distribSlots = [];
+    renderInventoryUI();
+    renderHotbar();
+  } else if (dragMoved && held) {
     const target = findTargetSlot(e);
     if (target && target.kind !== 'out') dropHeldInto(target.kind, target.i);
     else returnHeld();
+    distributing = false;
+    distribSlots = [];
     renderInventoryUI();
     renderHotbar();
+  } else {
+    distributing = false;
+    distribSlots = [];
   }
   dragMoved = false;
 });
@@ -987,15 +1111,18 @@ document.getElementById('btn-online').onclick = async () => {
   // flush any pending singleplayer save before we replace the world
   if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
   save();
-  netStatus.textContent = 'Connecting to the shared world…';
+  netStatus.textContent = 'Connecting…';
   multiplayer = true;
-  rebuildWorld(SHARED_SEED); // everyone uses the same fixed-seed terrain
+  rebuildWorld(SHARED_SEED);
   net = new Net(netHandlers());
   try {
     const role = await net.connectShared('MAIN');
-    netStatus.textContent = role === 'hosting' ? 'You opened the shared world — friends can join now!' : 'Connected to the shared world!';
+    netStatus.textContent = role === 'hosting' ? 'You are hosting — friends can join now!' : 'Connected!';
     setTimeout(startGame, 400);
-  } catch (e) { netStatus.textContent = 'Error: ' + e.message + ' (try again)'; multiplayer = false; }
+  } catch (e) {
+    netStatus.textContent = 'Error: ' + e.message + ' Try again.';
+    multiplayer = false;
+  }
 };
 
 // ---------------------------------------------------------------------------
