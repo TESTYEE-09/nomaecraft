@@ -99,9 +99,46 @@ function blobs(ctx, ox, oy, color, count, seed) {
   }
 }
 
+// ---- Progressive crack textures --------------------------------------------
+// 5 stages (0 = none, 4 = dense). Drawn on transparent backgrounds so the
+// crack overlay mesh can layer on top of the block face.
+const CRACK_STAGES = 5;
+function drawCrackStage(ctx, ox, oy, stage) {
+  // stage 0: blank (unused — caller skips drawing the overlay)
+  // stages 1..4: 4..14 jagged dark lines
+  const lines = stage * 3 + 2;        // 5, 8, 11, 14
+  let s = stage * 7 + 1;
+  const rnd = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+  ctx.lineWidth = 1;
+  for (let i = 0; i < lines; i++) {
+    let x = rnd() * TILE, y = rnd() * TILE;
+    const segs = 3 + ((rnd() * 3) | 0);
+    ctx.beginPath();
+    ctx.moveTo(ox + x, oy + y);
+    for (let k = 0; k < segs; k++) {
+      x = Math.max(0, Math.min(TILE - 1, x + (rnd() - 0.5) * 6));
+      y = Math.max(0, Math.min(TILE - 1, y + (rnd() - 0.5) * 6));
+      ctx.lineTo(ox + x, oy + y);
+    }
+    // dark stroke with a faint highlight
+    ctx.strokeStyle = `rgba(0,0,0,${0.55 + rnd() * 0.3})`;
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(255,255,255,${0.1 + rnd() * 0.1})`;
+    ctx.stroke();
+  }
+  // a couple of "chip" dark dots per stage
+  const chips = stage * 2;
+  for (let i = 0; i < chips; i++) {
+    const cx = (rnd() * TILE) | 0, cy = (rnd() * TILE) | 0;
+    ctx.fillStyle = `rgba(0,0,0,${0.5 + rnd() * 0.4})`;
+    ctx.fillRect(ox + cx, oy + cy, 1, 1);
+    if (rnd() > 0.5) ctx.fillRect(ox + cx + 1, oy + cy, 1, 1);
+  }
+}
+
 // Build the atlas and return { texture, uv(tileIdx) -> {u0,v0,u1,v1} }
 export function buildAtlas(THREE) {
-  const rows = 4;
+  const rows = 5; // one extra row for crack stages
   atlasCanvas = document.createElement('canvas');
   atlasCanvas.width = ATLAS_COLS * TILE;
   atlasCanvas.height = rows * TILE;
@@ -161,6 +198,17 @@ export function buildAtlas(THREE) {
     c.fillStyle = '#ffffaa'; c.fillRect(ox + 7, oy + 3, 2, 2);
   });
 
+  // crack stages (row 4, columns 0..3 — stage 0..3 to keep within 4 tiles;
+  // stage 4 reuses stage 3 with the per-face UV animation done in main.js
+  // by adding a faint extra-dark tint when progress >= 1)
+  const crackTiles = [];
+  for (let s = 1; s < CRACK_STAGES; s++) {
+    crackTiles.push(newTile((c, ox, oy) => {
+      c.clearRect(ox, oy, TILE, TILE);
+      drawCrackStage(c, ox, oy, s);
+    }));
+  }
+
   const texture = new THREE.CanvasTexture(atlasCanvas);
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.NearestFilter;
@@ -202,7 +250,10 @@ export function buildAtlas(THREE) {
     [BLOCK.TORCH]:       { all: tileMap.torch },
   };
 
-  return { texture, uv, faces, tileMap, canvas: atlasCanvas, ATLAS_COLS, TILE };
+  // pre-computed UVs for the 4 crack stages (for the per-face overlay mesh)
+  const crackUVs = crackTiles.map(idx => uv(idx));
+
+  return { texture, uv, faces, tileMap, canvas: atlasCanvas, ATLAS_COLS, TILE, crackUVs, crackTiles };
 }
 
 // Tile index lookup for inventory icons

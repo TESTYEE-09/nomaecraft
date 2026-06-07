@@ -7,6 +7,8 @@ import { ITEMS } from './items.js';
 import { MobManager } from './mobs.js';
 import { Net } from './multiplayer.js';
 import { RemotePlayer } from './remoteplayer.js';
+import * as Audio from './audio.js';
+import { DropManager } from './drops.js';
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -60,11 +62,47 @@ const highlightBox = new THREE.LineSegments(
   new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.5, depthTest: true })
 );
 highlightBox.visible = false; scene.add(highlightBox);
-const breakBox = new THREE.Mesh(
-  new THREE.BoxGeometry(1.01, 1.01, 1.01),
-  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0, depthWrite: false })
-);
-breakBox.visible = false; scene.add(breakBox);
+// Breaking overlay: 6 face planes slightly outside the block, each textured
+// with the current crack stage tile. We use one BoxGeometry with 6 materials
+// so we can swap UVs in place via geometry.attributes.uv.
+function makeCrackBox() {
+  const geo = new THREE.BoxGeometry(1.001, 1.001, 1.001);
+  // each face's UV slot is independent in BoxGeometry — we can remap them
+  const mats = [];
+  for (let f = 0; f < 6; f++) {
+    mats.push(new THREE.MeshBasicMaterial({
+      map: atlas.texture, transparent: true, opacity: 1, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    }));
+  }
+  const mesh = new THREE.Mesh(geo, mats);
+  mesh.visible = false; scene.add(mesh);
+  return mesh;
+}
+let breakBox = null; // built lazily after atlas is ready (now)
+breakBox = makeCrackBox();
+let currentCrackStage = -1; // tracks last-applied stage so we only swap UVs on change
+function applyCrackStage(stage) {
+  if (!atlas.crackUVs || atlas.crackUVs.length === 0) return;
+  // 6 faces; map face index 0..5 → crackUVs[stage]
+  // BoxGeometry groups: 0:+X 1:-X 2:+Y 3:-Y 4:+Z 5:-Z (3 quads per face: 4 verts)
+  const uvAttr = breakBox.geometry.attributes.uv;
+  // For each face (3 quads × 4 verts = 12 verts) overwrite UVs
+  // BoxGeometry stores UVs per face as a 4×N grid; safe to overwrite in groups of 4
+  for (let face = 0; face < 6; face++) {
+    const cu = atlas.crackUVs[stage] || atlas.crackUVs[atlas.crackUVs.length - 1];
+    // Default BoxGeometry face UVs are (0,1) (1,1) (0,0) (1,0) per quad; we mirror
+    // those 4 corners onto the chosen crack tile:
+    const corners = [
+      [cu.u0, cu.v0], [cu.u1, cu.v0], [cu.u0, cu.v1], [cu.u1, cu.v1],
+    ];
+    // each face has 4 vertices (2 triangles)
+    for (let q = 0; q < 4; q++) {
+      const vi = face * 4 + q;
+      uvAttr.setXY(vi, corners[q][0], corners[q][1]);
+    }
+  }
+  uvAttr.needsUpdate = true;
+}
 let currentTarget = null; // {hit, place, block} from per-frame raycast
 
 // ---------------------------------------------------------------------------
@@ -74,6 +112,7 @@ const input = { forward: 0, back: 0, left: 0, right: 0, jump: 0, sneak: 0, sprin
 let mining = false, placing = false, locked = false, paused = true, invOpen = false;
 let breakTarget = null, breakProgress = 0;
 let eatCD = 0, placeCD = 0, attackAnim = 0, sprintTapT = 0;
+let stepCD = 0;  // footstep throttle (seconds)
 
 const keymap = {
   KeyW: 'forward', KeyS: 'back', KeyA: 'left', KeyD: 'right',
@@ -82,12 +121,14 @@ const keymap = {
 
 addEventListener('keydown', (e) => {
   if (chatInput && document.activeElement === chatInput) return;
+  Audio.resumeAudio(); // first user gesture also unlocks the audio context
   if (e.code in keymap) { input[keymap[e.code]] = 1; if (e.code === 'KeyW') { const now = performance.now(); if (now - sprintTapT < 280) input.sprint = 1; sprintTapT = now; } }
   if (e.code === 'ControlLeft' || e.code === 'ControlRight') input.sprint = 1;
   if (e.code.startsWith('Digit')) { const n = +e.code.slice(5); if (n >= 1 && n <= 9) selectHotbar(n - 1); }
   if (e.code === 'KeyE') { e.preventDefault(); toggleInventory(); }
   if (e.code === 'KeyF') { player.flying = !player.flying; player.vel.set(0, 0, 0); flash('Fly: ' + (player.flying ? 'ON' : 'OFF')); }
   if (e.code === 'KeyT' && !invOpen && !paused) { e.preventDefault(); openChat(); }
+  if (e.code === 'KeyQ' && !invOpen && !paused) { e.preventDefault(); dropOneFromHotbar(); }
   if (e.code === 'Escape') { if (invOpen) toggleInventory(); }
 });
 addEventListener('keyup', (e) => {
@@ -102,6 +143,7 @@ document.addEventListener('mousemove', (e) => { if (locked) { input.mouseDX += e
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('mousedown', (e) => {
   if (paused || invOpen) return;
+  Audio.resumeAudio();
   if (!locked) { canvas.requestPointerLock(); return; }
   if (e.button === 0) { mining = true; swingAttack(); }
   if (e.button === 2) { placing = true; useItem(); }
@@ -130,6 +172,9 @@ function itemCanvas(id) {
   iconCache.set(id, cv);
   return cv;
 }
+
+// dropped-item entities (mining/mob drops + Q-throw from hotbar)
+const dropMgr = new DropManager(THREE, scene, itemCanvas);
 
 // ---------------------------------------------------------------------------
 // HUD
@@ -247,22 +292,33 @@ function updateTarget() {
 }
 
 function mineUpdate(dt) {
-  if (!mining || !currentTarget) { breakBox.visible = false; if (!mining) { breakTarget = null; breakProgress = 0; } return; }
+  if (!mining || !currentTarget) { breakBox.visible = false; if (!mining) { breakTarget = null; breakProgress = 0; currentCrackStage = -1; } return; }
   const hit = currentTarget;
   const d = blockDefs[hit.block];
   if (d.unbreakable) { breakTarget = null; breakBox.visible = false; return; }
   const key = hit.hit.x + ',' + hit.hit.y + ',' + hit.hit.z;
-  if (key !== breakTarget) { breakTarget = key; breakProgress = 0; }
+  if (key !== breakTarget) { breakTarget = key; breakProgress = 0; currentCrackStage = -1; }
   const tool = selectedTool();
   breakProgress += dt / breakTime(hit.block, tool);
-  // breaking overlay darkens as it progresses
+  // progressive crack overlay — pick one of 4 stages based on progress
+  const stage = Math.min(3, Math.floor(breakProgress * 4));
+  if (stage !== currentCrackStage) {
+    applyCrackStage(stage);
+    currentCrackStage = stage;
+    // throttled mining "thunk" once per stage advance (~4× per break)
+    Audio.playMine(Audio.blockMaterial(hit.block));
+  }
   breakBox.position.set(hit.hit.x + 0.5, hit.hit.y + 0.5, hit.hit.z + 0.5);
-  breakBox.material.opacity = Math.min(0.6, breakProgress * 0.6);
   breakBox.visible = true;
   if (breakProgress >= 1) {
-    breakProgress = 0; breakTarget = null; breakBox.visible = false;
-    for (const [id, n] of dropsFor(hit.block, tool)) inventory.add(id, n);
+    breakProgress = 0; breakTarget = null; breakBox.visible = false; currentCrackStage = -1;
+    // spawn drops as world entities (instead of adding straight to inventory)
+    for (const [id, n] of dropsFor(hit.block, tool)) {
+      dropMgr.spawn(id, n, { x: hit.hit.x + 0.5, y: hit.hit.y + 0.9, z: hit.hit.z + 0.5 },
+                            { x: (Math.random() - 0.5) * 1.4, y: 1.5, z: (Math.random() - 0.5) * 1.4 });
+    }
     setBlockShared(hit.hit.x, hit.hit.y, hit.hit.z, BLOCK.AIR);
+    Audio.playBreak(Audio.blockMaterial(hit.block));
     if (tool.item && tool.type !== TOOL.HAND) {
       tool.item.dura = (tool.item.dura ?? ITEMS[tool.item.id].tool.dura) - 1;
       if (tool.item.dura <= 0) inventory.removeSelected(1);
@@ -284,6 +340,7 @@ function useItem() {
       if (s.id === 'cooked_meat' || s.id === 'bread') player.heal(1);
       inventory.removeSelected(1);
       eatCD = 0.8; placeCD = 0.8; renderHotbar(); flash('Yum!');
+      Audio.playEat();
     }
     return;
   }
@@ -301,6 +358,7 @@ function useItem() {
       setBlockShared(p.x, p.y, p.z, def.block);
       inventory.removeSelected(1);
       placeCD = 0.18; attackAnim = 0.2; renderHotbar();
+      Audio.playPlace(Audio.blockMaterial(def.block));
     }
   }
 }
@@ -311,8 +369,30 @@ function swingAttack() {
   const dmg = tool.attack || 1;
   const m = mobs.attack(camera, player, dmg);
   if (m) {
+    Audio.playMobHurt();
     if (tool.item && tool.type !== TOOL.HAND) { tool.item.dura = (tool.item.dura ?? ITEMS[tool.item.id].tool.dura) - 1; if (tool.item.dura <= 0) { inventory.removeSelected(1); renderHotbar(); } }
   }
+}
+
+// Drop one item from the currently selected hotbar slot. Spawns it in front
+// of the player with a small forward / upward throw velocity, then plays a
+// "whoosh" sound. Empty hands = nothing.
+function dropOneFromHotbar() {
+  const s = inventory.selectedItem();
+  if (!s) return;
+  const def = ITEMS[s.id];
+  if (!def) return;
+  // forward direction from the camera, flattened
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir); dir.y = 0; dir.normalize();
+  const sideJitter = (Math.random() - 0.5) * 1.2;
+  const right = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar(sideJitter);
+  const start = { x: player.pos.x + dir.x * 0.6, y: player.pos.y + 1.2, z: player.pos.z + dir.z * 0.6 };
+  const vel = { x: dir.x * 2.0 + right.x, y: 1.8, z: dir.z * 2.0 + right.z };
+  dropMgr.spawn(s.id, 1, start, vel);
+  inventory.removeSelected(1);
+  renderHotbar();
+  Audio.playDrop();
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +619,7 @@ function rebuildWorld(seed) {
   player.onHurt = onHurt;
   mobs = new MobManager(THREE, world, scene);
   torchSet.clear();
+  dropMgr.clear();
 }
 
 function startGame() {
@@ -569,6 +650,7 @@ function onDeath() {
 }
 function onHurt(n) {
   const el = document.getElementById('hurt'); el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 120);
+  Audio.playHurt();
 }
 document.getElementById('respawn-btn').onclick = () => { document.getElementById('death').classList.add('hidden'); player.respawn(); canvas.requestPointerLock(); };
 
@@ -649,11 +731,39 @@ function loop(now) {
     updateTarget();
     mineUpdate(dt);
     if (placing) useItem();
+    // footstep audio: when moving on the ground
+    stepCD = Math.max(0, stepCD - dt);
+    const moving = (input.forward || input.back || input.left || input.right) && !player.flying;
+    if (moving && player.onGround && stepCD <= 0) {
+      const interval = input.sprint ? 0.32 : 0.46;
+      Audio.playStep(!!input.sprint);
+      stepCD = interval;
+    }
   } else { highlightBox.visible = false; breakBox.visible = false; }
 
   dayTime += dt;
   world.update(player.pos.x, player.pos.z, RENDER_DIST);
-  mobs.update(dt, player, isNight(), (id, n) => inventory.add(id, n));
+  mobs.update(dt, player, isNight(), (id, n) => {
+    // mob death drop — spawn a world entity near the mob's last position.
+    // We don't have the mob reference here, so spawn at the player; the
+    // pickup AABB is 1.5m so the player almost always grabs it on the spot.
+    dropMgr.spawn(id, n,
+      { x: player.pos.x, y: player.pos.y + 1.0, z: player.pos.z },
+      { x: (Math.random() - 0.5) * 1.2, y: 1.4, z: (Math.random() - 0.5) * 1.2 });
+  });
+  // dropped-item physics + pickup (plays playPickup() on successful pickup).
+  // We temporarily wrap inventory.add to know whether the pickup actually
+  // consumed at least one of the item before the drop decides its fate.
+  const _origAdd = inventory.add.bind(inventory);
+  inventory.add = (id, count) => {
+    const before = inventory.count(id);
+    const left = _origAdd(id, count);
+    const after = inventory.count(id);
+    if (after > before) Audio.playPickup();
+    return left;
+  };
+  dropMgr.update(dt, player, world, inventory);
+  inventory.add = _origAdd;
   syncMultiplayer(dt);
   updateSky();
   updateTorchLights();
