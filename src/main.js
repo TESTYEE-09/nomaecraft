@@ -208,6 +208,7 @@ function renderHotbar() {
     if (s) div.appendChild(slotInner(s));
     hotbarEl.appendChild(div);
   }
+  saveSoon();
 }
 function slotInner(s) {
   const frag = document.createDocumentFragment();
@@ -218,7 +219,7 @@ function slotInner(s) {
   if (s.dura !== undefined && ITEMS[s.id]?.tool) { const d = document.createElement('div'); d.className = 'dura'; const i = document.createElement('i'); i.style.width = (100 * s.dura / ITEMS[s.id].tool.dura) + '%'; d.appendChild(i); frag.appendChild(d); }
   return frag;
 }
-function selectHotbar(i) { inventory.selected = i; renderHotbar(); }
+function selectHotbar(i) { inventory.selected = i; renderHotbar(); saveSoon(); }
 
 // ---------------------------------------------------------------------------
 // Block break / place
@@ -262,6 +263,7 @@ function setBlockShared(x, y, z, b, broadcast = true) {
   if (b === BLOCK.TORCH) torchSet.add(x + ',' + y + ',' + z);
   else torchSet.delete(x + ',' + y + ',' + z);
   if (broadcast && multiplayer && net) net.sendBlock(x, y, z, b);
+  if (!multiplayer) saveSoon();
 }
 
 // recompute the block the player is aiming at, and update the highlight box
@@ -425,12 +427,23 @@ function toggleInventory() {
   }
 }
 
-function makeUISlot(getItem, onClick, extraClass = '') {
+function makeUISlot(getItem, onMouseDown, onMouseUp, extraClass = '') {
   const div = document.createElement('div');
   div.className = 'slot ' + extraClass;
   const s = getItem();
   if (s) div.appendChild(slotInner(s));
-  div.onclick = (e) => { onClick(e); };
+  // Drag-and-drop support. mousedown picks up (or arms a swap), mousemove
+  // tracks the cursor with the held icon, mouseup drops on a target slot.
+  // Click-based pick/place still works for non-drag users.
+  div.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    onMouseDown(e, div);
+  });
+  div.addEventListener('mouseup', (e) => {
+    if (e.button !== 0) return;
+    onMouseUp(e, div);
+  });
   return div;
 }
 
@@ -439,20 +452,188 @@ function renderInventoryUI() {
   craftGrid.innerHTML = '';
   craftGrid.style.gridTemplateColumns = `repeat(${craftSize}, 48px)`;
   for (let i = 0; i < craftSize * craftSize; i++) {
-    craftGrid.appendChild(makeUISlot(() => craftSlots[i], () => { clickCraft(i); }));
+    craftGrid.appendChild(makeUISlot(
+      () => craftSlots[i],
+      (e, div) => craftMouseDown(i, div, e),
+      (e, div) => craftMouseUp(i, div, e),
+    ));
   }
   // result
   craftResult = matchRecipe(craftSlots.map(s => s ? s.id : null), craftSize);
   craftOut.innerHTML = '';
-  craftOut.appendChild(makeUISlot(() => craftResult ? { id: craftResult.out, count: craftResult.count } : null, () => takeCraft(), 'out-slot'));
+  craftOut.appendChild(makeUISlot(
+    () => craftResult ? { id: craftResult.out, count: craftResult.count } : null,
+    (e, div) => { if (craftResult && !held) { takeCraft(); } },
+    () => {},
+    'out-slot',
+  ));
   // main inventory (slots 9..35)
   invMain.innerHTML = '';
-  for (let i = 9; i < 36; i++) invMain.appendChild(makeUISlot(() => inventory.slots[i], () => clickInv(i)));
+  for (let i = 9; i < 36; i++) invMain.appendChild(makeUISlot(
+    () => inventory.slots[i],
+    (e, div) => invMouseDown(i, div, e),
+    (e, div) => invMouseUp(i, div, e),
+  ));
   // hotbar (0..8)
   invHotbar.innerHTML = '';
-  for (let i = 0; i < 9; i++) invHotbar.appendChild(makeUISlot(() => inventory.slots[i], () => clickInv(i)));
+  for (let i = 0; i < 9; i++) invHotbar.appendChild(makeUISlot(
+    () => inventory.slots[i],
+    (e, div) => invMouseDown(i, div, e),
+    (e, div) => invMouseUp(i, div, e),
+  ));
   // held item cursor
   renderHeld();
+  // inventory state changed — debounce a save so a crash doesn't lose it
+  saveSoon();
+}
+
+// ---- drag-and-drop state ----------------------------------------------------
+// dragSrc: { kind: 'craft'|'inv', i: index, x, y } when a drag is in progress.
+// We use document-level mousemove to track the cursor while dragging, and
+// figure out the target slot at mouseup by walking up from event.target.
+let dragSrc = null;
+
+function findTargetSlot(e) {
+  // The mouseup fires on the document (because we wired it at the document
+  // level), so we need elementFromPoint to find the slot under the cursor.
+  // Fall back to walking up from event.target if that's somehow more useful.
+  let el = (typeof document.elementFromPoint === 'function')
+    ? document.elementFromPoint(e.clientX, e.clientY)
+    : null;
+  if (!el) el = e.target;
+  while (el && el !== document.body) {
+    if (el.classList && el.classList.contains('slot')) {
+      if (el.classList.contains('out-slot')) return { kind: 'out' };
+      if (el.parentElement === craftGrid) {
+        const idx = Array.prototype.indexOf.call(craftGrid.children, el);
+        return { kind: 'craft', i: idx };
+      }
+      if (el.parentElement === invMain) {
+        const idx = Array.prototype.indexOf.call(invMain.children, el);
+        return { kind: 'inv', i: 9 + idx };
+      }
+      if (el.parentElement === invHotbar) {
+        const idx = Array.prototype.indexOf.call(invHotbar.children, el);
+        return { kind: 'inv', i: idx };
+      }
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function moveToCraft(i, src) {
+  const slot = craftSlots[i];
+  if (src.kind === 'craft') {
+    const from = src.i;
+    if (from === i) { held = null; return; } // drop on self = cancel
+    if (!slot) { craftSlots[i] = craftSlots[from]; craftSlots[from] = null; }
+    else if (slot.id === craftSlots[from].id) {
+      const max = ITEMS[slot.id].max; const add = Math.min(craftSlots[from].count, max - slot.count);
+      slot.count += add; craftSlots[from].count -= add; if (craftSlots[from].count <= 0) craftSlots[from] = null;
+    } else { const tmp = craftSlots[i]; craftSlots[i] = craftSlots[from]; craftSlots[from] = tmp; }
+  } else if (src.kind === 'inv') {
+    if (!slot) { craftSlots[i] = { id: inventory.slots[src.i].id, count: inventory.slots[src.i].count, dura: inventory.slots[src.i].dura }; inventory.slots[src.i] = null; }
+    else if (slot.id === inventory.slots[src.i].id) {
+      const max = ITEMS[slot.id].max; const add = Math.min(inventory.slots[src.i].count, max - slot.count);
+      slot.count += add; inventory.slots[src.i].count -= add; if (inventory.slots[src.i].count <= 0) inventory.slots[src.i] = null;
+    } else { const tmp = craftSlots[i]; craftSlots[i] = { id: inventory.slots[src.i].id, count: inventory.slots[src.i].count, dura: inventory.slots[src.i].dura }; inventory.slots[src.i] = tmp; }
+  }
+  held = null;
+}
+
+function moveToInv(i, src) {
+  const slot = inventory.slots[i];
+  if (src.kind === 'inv') {
+    const from = src.i;
+    if (from === i) { held = null; return; }
+    if (!slot) { inventory.slots[i] = inventory.slots[from]; inventory.slots[from] = null; }
+    else if (slot.id === inventory.slots[from].id) {
+      const max = ITEMS[slot.id].max; const add = Math.min(inventory.slots[from].count, max - slot.count);
+      slot.count += add; inventory.slots[from].count -= add; if (inventory.slots[from].count <= 0) inventory.slots[from] = null;
+    } else { const tmp = inventory.slots[i]; inventory.slots[i] = inventory.slots[from]; inventory.slots[from] = tmp; }
+  } else if (src.kind === 'craft') {
+    if (!slot) { inventory.slots[i] = { id: craftSlots[src.i].id, count: craftSlots[src.i].count, dura: craftSlots[src.i].dura }; craftSlots[src.i] = null; }
+    else if (slot.id === craftSlots[src.i].id) {
+      const max = ITEMS[slot.id].max; const add = Math.min(craftSlots[src.i].count, max - slot.count);
+      slot.count += add; craftSlots[src.i].count -= add; if (craftSlots[src.i].count <= 0) craftSlots[src.i] = null;
+    } else { const tmp = inventory.slots[i]; inventory.slots[i] = { id: craftSlots[src.i].id, count: craftSlots[src.i].count, dura: craftSlots[src.i].dura }; craftSlots[src.i] = tmp; }
+  }
+  held = null;
+}
+
+function craftMouseDown(i, div, e) {
+  const slot = craftSlots[i];
+  if (!slot && !held) return; // nothing to grab
+  dragStartX = e.clientX; dragStartY = e.clientY; dragMoved = false;
+  if (held) { moveToCraft(i, { kind: heldSrc || 'inv', i: heldSrcI }); }
+  else { held = slot; heldSrc = 'craft'; heldSrcI = i; craftSlots[i] = null; }
+  renderInventoryUI();
+}
+function craftMouseUp(i, div, e) {
+  // mouseup on a slot: complete a drag if one is in progress
+  if (dragSrc) { endDrag(e); return; }
+  // pure click: if we just picked up and mouseup is on the same slot, put it back
+  if (held && heldSrc === 'craft' && heldSrcI === i) { craftSlots[i] = held; held = null; renderInventoryUI(); }
+}
+function invMouseDown(i, div, e) {
+  const slot = inventory.slots[i];
+  if (!slot && !held) return;
+  dragStartX = e.clientX; dragStartY = e.clientY; dragMoved = false;
+  if (held) { moveToInv(i, { kind: heldSrc, i: heldSrcI }); }
+  else { held = slot; heldSrc = 'inv'; heldSrcI = i; inventory.slots[i] = null; }
+  renderInventoryUI();
+}
+function invMouseUp(i, div, e) {
+  if (dragSrc) { endDrag(e); return; }
+  if (held && heldSrc === 'inv' && heldSrcI === i) { inventory.slots[i] = held; held = null; renderInventoryUI(); }
+}
+
+// track the drag start in a document-level mousedown handler so we can
+// distinguish a click (mouseup on same slot) from a drag (mouseup elsewhere)
+let heldSrc = null; // 'craft' | 'inv' | null
+let heldSrcI = -1;
+let dragMoved = false;
+let dragStartX = 0, dragStartY = 0;
+const DRAG_THRESHOLD = 4; // px
+
+document.addEventListener('mousemove', (e) => {
+  if (held && invOpen) {
+    if (!dragMoved) {
+      const dx = e.clientX - dragStartX, dy = e.clientY - dragStartY;
+      if (dx * dx + dy * dy > DRAG_THRESHOLD * DRAG_THRESHOLD) {
+        dragMoved = true;
+        dragSrc = { kind: heldSrc, i: heldSrcI };
+      }
+    }
+    if (heldEl) { heldEl.style.left = (e.clientX - 19) + 'px'; heldEl.style.top = (e.clientY - 19) + 'px'; }
+  }
+});
+document.addEventListener('mouseup', (e) => {
+  if (dragSrc) endDrag(e);
+  // reset drag state for the next pickup
+  dragMoved = false; dragSrc = null; heldSrc = null; heldSrcI = -1;
+});
+
+function endDrag(e) {
+  const target = findTargetSlot(e);
+  if (!target) {
+    // dropped outside any slot — return to source
+    if (held && heldSrc === 'craft') craftSlots[heldSrcI] = held;
+    else if (held && heldSrc === 'inv') inventory.slots[heldSrcI] = held;
+    held = null;
+  } else if (target.kind === 'craft') {
+    moveToCraft(target.i, dragSrc);
+  } else if (target.kind === 'inv') {
+    moveToInv(target.i, dragSrc);
+  } else if (target.kind === 'out') {
+    // dropped on the result slot — drop back to source
+    if (held && heldSrc === 'craft') craftSlots[heldSrcI] = held;
+    else if (held && heldSrc === 'inv') inventory.slots[heldSrcI] = held;
+    held = null;
+  }
+  renderInventoryUI();
+  renderHotbar();
 }
 
 let heldEl = null;
@@ -466,24 +647,6 @@ function renderHeld() {
 }
 addEventListener('mousemove', (e) => { if (heldEl) { heldEl.style.left = (e.clientX - 19) + 'px'; heldEl.style.top = (e.clientY - 19) + 'px'; } });
 
-function clickInv(i) {
-  const slot = inventory.slots[i];
-  if (held) {
-    if (!slot) { inventory.slots[i] = held; held = null; }
-    else if (slot.id === held.id) { const max = ITEMS[slot.id].max; const add = Math.min(held.count, max - slot.count); slot.count += add; held.count -= add; if (held.count <= 0) held = null; }
-    else { inventory.slots[i] = held; held = slot; }
-  } else if (slot) { held = slot; inventory.slots[i] = null; }
-  renderInventoryUI();
-}
-function clickCraft(i) {
-  const slot = craftSlots[i];
-  if (held) {
-    if (!slot) { craftSlots[i] = { id: held.id, count: held.count, dura: held.dura }; held = null; }
-    else if (slot.id === held.id) { const max = ITEMS[slot.id].max; const add = Math.min(held.count, max - slot.count); slot.count += add; held.count -= add; if (held.count <= 0) held = null; }
-    else { const tmp = craftSlots[i]; craftSlots[i] = held; held = tmp; }
-  } else if (slot) { held = slot; craftSlots[i] = null; }
-  renderInventoryUI();
-}
 function takeCraft() {
   if (!craftResult) return;
   // consume one of each ingredient
@@ -646,18 +809,40 @@ document.getElementById('respawn-btn').onclick = () => { document.getElementById
 // ---------------------------------------------------------------------------
 // Persistence (singleplayer)
 // ---------------------------------------------------------------------------
-const SAVE_KEY = 'nomaecraft_save_v1';
+const SAVE_KEY = 'nomaecraft_save_v2';
+// Tracks whether a save is queued (debounced). Inventory / block changes
+// call saveSoon() and we coalesce into one localStorage write every 800ms
+// — much safer than the previous 10s fixed interval.
+let _saveTimer = null;
 function save() {
   if (multiplayer) return;
+  if (!world || !player) return;
   try {
+    // snapshot world entities (dropped items) so they survive reload
+    const drops = dropMgr.drops.map(d => ({
+      id: d.itemId, n: d.count, x: d.pos.x, y: d.pos.y, z: d.pos.z,
+    }));
     localStorage.setItem(SAVE_KEY, JSON.stringify({
+      v: 2,
       seed: world.seed,
       edits: Array.from(world.edits.entries()),
       inv: inventory.serialize(),
       pos: [player.pos.x, player.pos.y, player.pos.z],
       time: dayTime,
+      sel: inventory.selected,
+      hp: player.health,
+      hunger: player.hunger,
+      sat: player.saturation,
+      drops,
     }));
-  } catch {}
+  } catch (e) {
+    // localStorage full or blocked — fail silently, no crash
+    console.warn('nomaecraft save failed:', e?.message);
+  }
+}
+function saveSoon() {
+  if (_saveTimer) return;
+  _saveTimer = setTimeout(() => { _saveTimer = null; save(); }, 800);
 }
 function loadSave() {
   try {
@@ -666,14 +851,50 @@ function loadSave() {
     rebuildWorld(d.seed);
     for (const [k, b] of d.edits) { const [x, y, z] = k.split(',').map(Number); world.setBlock(x, y, z, b, true); if (b === BLOCK.TORCH) torchSet.add(k); }
     inventory.load(d.inv);
+    if (typeof d.sel === 'number') inventory.selected = d.sel;
     player.pos.set(d.pos[0], d.pos[1], d.pos[2]);
     player.spawn.copy(player.pos);
+    if (typeof d.hp === 'number') player.health = d.hp;
+    if (typeof d.hunger === 'number') player.hunger = d.hunger;
+    if (typeof d.sat === 'number') player.saturation = d.sat;
     dayTime = d.time || 60;
+    // restore world-entity dropped items
+    if (Array.isArray(d.drops)) {
+      for (const dr of d.drops) {
+        dropMgr.spawn(dr.id, dr.n, { x: dr.x, y: dr.y, z: dr.z });
+      }
+    }
     return true;
-  } catch { return false; }
+  } catch (e) {
+    console.warn('nomaecraft load failed:', e?.message);
+    return false;
+  }
 }
-setInterval(save, 10000);
+// periodic safety net (every 30s) in case the user closes the tab
+// without firing beforeunload (e.g. browser crash)
+setInterval(save, 30000);
 addEventListener('beforeunload', save);
+// also save when the page is hidden (mobile background, tab switch)
+document.addEventListener('visibilitychange', () => { if (document.hidden) save(); });
+
+// One-time migration: if a v1 save exists and no v2, copy it forward so the
+// user's world isn't lost. v1 had [id, count] tuples only — v2 adds dura.
+(function migrateV1Save() {
+  try {
+    if (localStorage.getItem(SAVE_KEY)) return; // v2 already there
+    const v1 = localStorage.getItem('nomaecraft_save_v1');
+    if (!v1) return;
+    const d = JSON.parse(v1);
+    // v1 has no `v` field, no `sel`, no `hp`, no `drops`. Forward it as v2.
+    d.v = 2; if (typeof d.sel !== 'number') d.sel = 0;
+    if (typeof d.hp !== 'number') d.hp = 20;
+    if (typeof d.hunger !== 'number') d.hunger = 20;
+    if (typeof d.sat !== 'number') d.sat = 5;
+    if (!Array.isArray(d.drops)) d.drops = [];
+    localStorage.setItem(SAVE_KEY, JSON.stringify(d));
+    localStorage.removeItem('nomaecraft_save_v1');
+  } catch {}
+})();
 
 // ---------------------------------------------------------------------------
 // Menu wiring
@@ -694,6 +915,9 @@ document.getElementById('btn-single').onclick = () => {
 
 document.getElementById('btn-online').onclick = async () => {
   readName();
+  // flush any pending singleplayer save before we replace the world
+  if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
+  save();
   netStatus.textContent = 'Connecting to the shared world…';
   multiplayer = true;
   rebuildWorld(SHARED_SEED); // everyone uses the same fixed-seed terrain
@@ -780,4 +1004,6 @@ window.nomae = {
   block: (x, y, z) => world.getBlock(x, y, z),
   look: (pitch, yaw) => { player.pitch = pitch; if (yaw !== undefined) player.yaw = yaw; return 'looking'; },
   mineAimed: () => { if (!currentTarget) return 'no block in view'; const t = selectedTool(); const drops = dropsFor(currentTarget.block, t); for (const [id, n] of drops) inventory.add(id, n); const b = currentTarget.block; setBlockShared(currentTarget.hit.x, currentTarget.hit.y, currentTarget.hit.z, BLOCK.AIR); renderHotbar(); return { mined: b, got: drops }; },
+  save: () => { save(); return 'saved'; },
+  saveInfo: () => { const raw = localStorage.getItem(SAVE_KEY); if (!raw) return 'no save'; const d = JSON.parse(raw); return { v: d.v, seed: d.seed, edits: d.edits?.length, invItems: d.inv?.filter(Boolean).length, pos: d.pos, time: d.time?.toFixed(0), sel: d.sel, hp: d.hp, hunger: d.hunger, drops: d.drops?.length || 0, bytes: raw.length }; },
 };
