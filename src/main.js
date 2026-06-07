@@ -1049,17 +1049,19 @@ function loop(now) {
   // dropped-item physics + pickup (plays playPickup() on successful pickup).
   // We temporarily wrap inventory.add to know whether the pickup actually
   // consumed at least one of the item before the drop decides its fate.
+  let _pickedUp = false;
   const _origAdd = inventory.add.bind(inventory);
   inventory.add = (id, count) => {
     const before = inventory.count(id);
     const left = _origAdd(id, count);
     const after = inventory.count(id);
-    if (after > before) Audio.playPickup();
+    if (after > before) { Audio.playPickup(); _pickedUp = true; }
     return left;
   };
   try { dropMgr.update(dt, player, world, inventory); }
   catch (err) { console.error('dropMgr error:', err); }
   finally { inventory.add = _origAdd; }
+  if (_pickedUp) renderHotbar();
   syncMultiplayer(dt);
   updateSky();
   updateTorchLights();

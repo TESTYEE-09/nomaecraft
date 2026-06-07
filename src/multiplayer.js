@@ -29,23 +29,28 @@ export class Net {
     return this._tryConnect(room);
   }
 
-  async _tryConnect(room) {
-    try {
-      await this.join(room);
-      return 'joined';
-    } catch (e) {
-      this.close();
+  async _tryConnect(room, retries = 3) {
+    for (let attempt = 0; attempt < retries; attempt++) {
       try {
-        await this.host(room);
-        return 'hosting';
-      } catch (e2) {
-        // lost the race to host — wait, then join the winner
-        this.close();
-        await new Promise(r => setTimeout(r, 600 + Math.random() * 900));
         await this.join(room);
         return 'joined';
+      } catch (e) {
+        this.close();
+        try {
+          await this.host(room);
+          return 'hosting';
+        } catch (e2) {
+          this.close();
+          if (attempt < retries - 1) {
+            await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
+          }
+        }
       }
     }
+    // final attempt
+    await new Promise(r => setTimeout(r, 500 + Math.random() * 1000));
+    await this.join(room);
+    return 'joined';
   }
 
   _migrate() {
@@ -125,7 +130,7 @@ export class Net {
         // timeout
         setTimeout(() => { if (!done) reject(new Error('Connection timed out. Is the host online?')); }, 12000);
       });
-      this.peer.on('error', (e) => { if (e.type === 'peer-unavailable') reject(new Error('No host found for that room code.')); });
+      this.peer.on('error', (e) => { if (!done) { done = true; reject(new Error(e.type === 'peer-unavailable' ? 'No host found for that room code.' : 'Connection error: ' + (e.type || e.message))); } });
     });
   }
 
