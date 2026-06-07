@@ -127,7 +127,7 @@ const keymap = {
 };
 
 addEventListener('keydown', (e) => {
-  if (chatInput && document.activeElement === chatInput) return;
+  if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) return;
   Audio.resumeAudio(); // first user gesture also unlocks the audio context
   if (e.code in keymap) { input[keymap[e.code]] = 1; if (e.code === 'KeyW') { const now = performance.now(); if (now - sprintTapT < 280) input.sprint = 1; sprintTapT = now; } }
   if (e.code === 'ControlLeft' || e.code === 'ControlRight') input.sprint = 1;
