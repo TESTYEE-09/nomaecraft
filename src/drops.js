@@ -38,6 +38,9 @@ export class Drop {
     this.onGround = false;
     this.spin = (Math.random() * 4 + 2) * (Math.random() < 0.5 ? -1 : 1);
     this.bobPhase = Math.random() * Math.PI * 2;
+    // cached ground-collision state (re-scanned only when x/z column changes)
+    this._lastGX = -9999; this._lastGZ = -9999; this._groundY = 0;
+    this.world = null; // set by DropManager.update before our update runs
 
     // ---- mesh: a 0.35-unit textured plane facing up-ish, billboarded
     const tex = new THREE.CanvasTexture(iconCanvas);
@@ -75,19 +78,32 @@ export class Drop {
     this.pos.x += this.vel.x * dt;
     this.pos.y += this.vel.y * dt;
     this.pos.z += this.vel.z * dt;
-    // ground collision: scan down to the top solid block under us
+    // ground collision: only rescan when the drop's column has changed, and
+    // step down in 4-block jumps instead of every y. This was O(64·drops)
+    // per frame before — at 20+ drops in a dense forest that's 1280+ chunk
+    // lookups per frame, which tanks the framerate.
     const gx = Math.floor(this.pos.x), gz = Math.floor(this.pos.z);
-    let groundY = 0;
-    for (let y = Math.floor(this.pos.y); y >= 0; y--) {
-      const b = this.world?.getBlock?.(gx, y, gz);
-      if (b !== undefined && b !== BLOCK.AIR && b !== BLOCK.WATER) { groundY = y + 1; break; }
-      if (b === undefined) break;
+    if (gx !== this._lastGX || gz !== this._lastGZ) {
+      this._lastGX = gx; this._lastGZ = gz; this._groundY = 0;
     }
-    if (this.pos.y < groundY + 0.05) {
-      this.pos.y = groundY + 0.05;
-      this.vel.y = 0;
-      this.vel.x *= 0.6; this.vel.z *= 0.6;
-      this.onGround = true;
+    if (this.pos.y < this._groundY + 0.05) {
+      // walk down in 4-block chunks until we find a solid, then binary-refine
+      const w = this.world;
+      if (!w) { this._groundY = 0; }
+      else {
+        let y = Math.max(0, Math.floor(this.pos.y) - 1);
+        // jump down in 4s
+        while (y > 4 && !w.isSolid(gx, y, gz) && w.getBlock(gx, y, gz) !== BLOCK.WATER) y -= 4;
+        // refine
+        while (y > 0 && !w.isSolid(gx, y, gz) && w.getBlock(gx, y, gz) !== BLOCK.WATER) y--;
+        if (w.isSolid(gx, y, gz)) this._groundY = y + 1;
+      }
+      if (this.pos.y < this._groundY + 0.05) {
+        this.pos.y = this._groundY + 0.05;
+        this.vel.y = 0;
+        this.vel.x *= 0.6; this.vel.z *= 0.6;
+        this.onGround = true;
+      }
     }
 
     // mild magnetic pull once the player gets close
@@ -112,7 +128,7 @@ export class Drop {
       // while airborne face the camera
       this.mesh.lookAt(player.pos.x, this.pos.y, player.pos.z);
     }
-    this.shadow.position.set(this.pos.x, groundY + 0.01, this.pos.z);
+    this.shadow.position.set(this.pos.x, this._groundY + 0.01, this.pos.z);
     // fade in the last 5s of life
     if (age > DESPAWN - 5) {
       const k = (DESPAWN - age) / 5;

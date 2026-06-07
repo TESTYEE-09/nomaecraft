@@ -62,45 +62,30 @@ const highlightBox = new THREE.LineSegments(
   new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.5, depthTest: true })
 );
 highlightBox.visible = false; scene.add(highlightBox);
-// Breaking overlay: 6 face planes slightly outside the block, each textured
-// with the current crack stage tile. We use one BoxGeometry with 6 materials
-// so we can swap UVs in place via geometry.attributes.uv.
-function makeCrackBox() {
-  const geo = new THREE.BoxGeometry(1.001, 1.001, 1.001);
-  // each face's UV slot is independent in BoxGeometry — we can remap them
-  const mats = [];
-  for (let f = 0; f < 6; f++) {
-    mats.push(new THREE.MeshBasicMaterial({
-      map: atlas.texture, transparent: true, opacity: 1, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
-    }));
-  }
-  const mesh = new THREE.Mesh(geo, mats);
-  mesh.visible = false; scene.add(mesh);
-  return mesh;
-}
-let breakBox = null; // built lazily after atlas is ready (now)
-breakBox = makeCrackBox();
+// Breaking overlay: a single textured plane that always faces the camera,
+// positioned at the targeted block's center. 4 stages of crack tiles, swapped
+// based on breakProgress. Using a billboard plane (instead of a 6-face box)
+// avoids the z-fighting / transparent-sorted nightmares we had before.
+const crackPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.15, 1.15),
+  new THREE.MeshBasicMaterial({
+    map: atlas.texture, transparent: true, alphaTest: 0.05,
+    depthTest: false, depthWrite: false,
+  })
+);
+crackPlane.visible = false;
+crackPlane.renderOrder = 999;
+scene.add(crackPlane);
 let currentCrackStage = -1; // tracks last-applied stage so we only swap UVs on change
 function applyCrackStage(stage) {
   if (!atlas.crackUVs || atlas.crackUVs.length === 0) return;
-  // 6 faces; map face index 0..5 → crackUVs[stage]
-  // BoxGeometry groups: 0:+X 1:-X 2:+Y 3:-Y 4:+Z 5:-Z (3 quads per face: 4 verts)
-  const uvAttr = breakBox.geometry.attributes.uv;
-  // For each face (3 quads × 4 verts = 12 verts) overwrite UVs
-  // BoxGeometry stores UVs per face as a 4×N grid; safe to overwrite in groups of 4
-  for (let face = 0; face < 6; face++) {
-    const cu = atlas.crackUVs[stage] || atlas.crackUVs[atlas.crackUVs.length - 1];
-    // Default BoxGeometry face UVs are (0,1) (1,1) (0,0) (1,0) per quad; we mirror
-    // those 4 corners onto the chosen crack tile:
-    const corners = [
-      [cu.u0, cu.v0], [cu.u1, cu.v0], [cu.u0, cu.v1], [cu.u1, cu.v1],
-    ];
-    // each face has 4 vertices (2 triangles)
-    for (let q = 0; q < 4; q++) {
-      const vi = face * 4 + q;
-      uvAttr.setXY(vi, corners[q][0], corners[q][1]);
-    }
-  }
+  const cu = atlas.crackUVs[stage] || atlas.crackUVs[atlas.crackUVs.length - 1];
+  // PlaneGeometry has 4 verts in order: TL, TR, BL, BR → (u0,v0)(u1,v0)(u0,v1)(u1,v1)
+  const uvAttr = crackPlane.geometry.attributes.uv;
+  uvAttr.setXY(0, cu.u0, cu.v0);
+  uvAttr.setXY(1, cu.u1, cu.v0);
+  uvAttr.setXY(2, cu.u0, cu.v1);
+  uvAttr.setXY(3, cu.u1, cu.v1);
   uvAttr.needsUpdate = true;
 }
 let currentTarget = null; // {hit, place, block} from per-frame raycast
@@ -292,10 +277,14 @@ function updateTarget() {
 }
 
 function mineUpdate(dt) {
-  if (!mining || !currentTarget) { breakBox.visible = false; if (!mining) { breakTarget = null; breakProgress = 0; currentCrackStage = -1; } return; }
+  if (!mining || !currentTarget) {
+    crackPlane.visible = false;
+    if (!mining) { breakTarget = null; breakProgress = 0; currentCrackStage = -1; }
+    return;
+  }
   const hit = currentTarget;
   const d = blockDefs[hit.block];
-  if (d.unbreakable) { breakTarget = null; breakBox.visible = false; return; }
+  if (d.unbreakable) { breakTarget = null; crackPlane.visible = false; return; }
   const key = hit.hit.x + ',' + hit.hit.y + ',' + hit.hit.z;
   if (key !== breakTarget) { breakTarget = key; breakProgress = 0; currentCrackStage = -1; }
   const tool = selectedTool();
@@ -308,10 +297,10 @@ function mineUpdate(dt) {
     // throttled mining "thunk" once per stage advance (~4× per break)
     Audio.playMine(Audio.blockMaterial(hit.block));
   }
-  breakBox.position.set(hit.hit.x + 0.5, hit.hit.y + 0.5, hit.hit.z + 0.5);
-  breakBox.visible = true;
+  crackPlane.position.set(hit.hit.x + 0.5, hit.hit.y + 0.5, hit.hit.z + 0.5);
+  crackPlane.visible = true;
   if (breakProgress >= 1) {
-    breakProgress = 0; breakTarget = null; breakBox.visible = false; currentCrackStage = -1;
+    breakProgress = 0; breakTarget = null; crackPlane.visible = false; currentCrackStage = -1;
     // spawn drops as world entities (instead of adding straight to inventory)
     for (const [id, n] of dropsFor(hit.block, tool)) {
       dropMgr.spawn(id, n, { x: hit.hit.x + 0.5, y: hit.hit.y + 0.9, z: hit.hit.z + 0.5 },
@@ -739,7 +728,7 @@ function loop(now) {
       Audio.playStep(!!input.sprint);
       stepCD = interval;
     }
-  } else { highlightBox.visible = false; breakBox.visible = false; }
+  } else { highlightBox.visible = false; crackPlane.visible = false; }
 
   dayTime += dt;
   world.update(player.pos.x, player.pos.z, RENDER_DIST);
@@ -771,6 +760,9 @@ function loop(now) {
 
   // underwater overlay
   document.getElementById('underwater').classList.toggle('show', player.headInWater());
+
+  // keep the crack overlay billboard-facing the camera (cheap, no allocation)
+  if (crackPlane.visible) crackPlane.lookAt(camera.position);
 
   renderer.render(scene, camera);
 }

@@ -186,7 +186,11 @@ export class World {
           const b = c.data[idx(lx, y, lz)];
           if (b === BLOCK.AIR) continue;
           const def = blockDefs[b];
-          const transparent = def.transparent;
+          // Leaves are visually 'transparent' (they have a transparent block
+          // flag) but the user wants them solid — push them through the opaque
+          // pass so they get full opacity and proper depth writing. Other
+          // transparent blocks (water, glass) still use the transparent pass.
+          const transparent = def.transparent && b !== BLOCK.LEAVES;
           const wx = baseX + lx, wz = baseZ + lz;
           const fmap = faces[b];
           for (const fd of faceDefs) {
