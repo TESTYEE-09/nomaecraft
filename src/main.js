@@ -1110,7 +1110,12 @@ function netHandlers() {
       // rebuild world with host's seed + edits
       rebuildWorld(seed);
       for (const [k, b] of edits) { const [x, y, z] = k.split(',').map(Number); world.setBlock(x, y, z, b, true); if (b === BLOCK.TORCH) torchSet.add(k); }
-      player.setSpawnToSurface();
+      // rebuildWorld made a fresh Player at the default spawn — restore the
+      // saved position/inventory/stats over it so a refresh keeps your spot.
+      const saved = readSave();
+      if (saved && Array.isArray(saved.pos)) restorePlayerState(saved);
+      else player.setSpawnToSurface();
+      renderHotbar();
       addChat('system', 'Joined world! Synced ' + edits.length + ' changes.');
     },
     onPlayer: (id, s) => {
@@ -1149,6 +1154,8 @@ function rebuildWorld(seed) {
   mobs = new MobManager(THREE, world, scene);
   torchSet.clear();
   dropMgr.clear();
+  // the drop entities were just wiped — allow the next restore to re-spawn them
+  _dropsRestored = false;
 }
 
 function startGame() {
@@ -1157,17 +1164,29 @@ function startGame() {
   document.getElementById('loading-text').textContent = 'Generating world…';
   // pre-generate + mesh the spawn area so there's solid ground under you immediately
   setTimeout(() => {
+    // Restore the player's saved state (inventory, position, look, stats)
+    // BEFORE generating chunks so we pre-gen around where they actually left
+    // off — not the default spawn. (The multiplayer onInit handler may also
+    // restore; restorePlayerState is safe to run twice and only spawns the
+    // saved drops once.)
+    const saved = readSave();
+    const haveSavedPos = !!(saved && Array.isArray(saved.pos));
+    if (saved) restorePlayerState(saved);
+
     const ccx = Math.floor(player.pos.x / CHUNK), ccz = Math.floor(player.pos.z / CHUNK);
     const PRE = 6;
     for (let dz = -PRE; dz <= PRE; dz++) for (let dx = -PRE; dx <= PRE; dx++) world.getChunk(ccx + dx, ccz + dz); // data pass
     for (let dz = -PRE; dz <= PRE; dz++) for (let dx = -PRE; dx <= PRE; dx++) { const c = world.chunks.get((ccx + dx) + ',' + (ccz + dz)); if (c) world.buildMesh(c); } // mesh pass
-    player.setSpawnToSurface();
+    // Only drop the player onto a fresh surface when there's no saved position.
+    if (!haveSavedPos) player.setSpawnToSurface();
     document.getElementById('loading').classList.add('hidden');
     hud.classList.remove('hidden');
     paused = false;
     renderHotbar();
+    updateAmmoHUD();
     canvas.requestPointerLock();
     addChat('system', multiplayer ? 'You are in the shared world! Press T to chat, E for inventory.' : 'Welcome! Left-click to mine, E for inventory, F to fly.');
+    save(); // persist the freshly-restored state right away
   }, 80);
 }
 
@@ -1191,8 +1210,8 @@ const SAVE_KEY = 'nomaecraft_save_v2';
 // call saveSoon() and we coalesce into one localStorage write every 800ms
 // — much safer than the previous 10s fixed interval.
 let _saveTimer = null;
+let _dropsRestored = false; // dropped-item entities are restored exactly once per session
 function save() {
-  if (multiplayer) return;
   if (!world || !player) return;
   try {
     // snapshot world entities (dropped items) so they survive reload
@@ -1201,15 +1220,22 @@ function save() {
     }));
     localStorage.setItem(SAVE_KEY, JSON.stringify({
       v: 2,
+      mp: multiplayer,
       seed: world.seed,
-      edits: Array.from(world.edits.entries()),
+      // In multiplayer the world's blocks come from the host over the network
+      // and re-sync on every join, so persisting the (potentially huge) shared
+      // edit set would just bloat localStorage. Only singleplayer needs edits.
+      edits: multiplayer ? [] : Array.from(world.edits.entries()),
       inv: inventory.serialize(),
       pos: [player.pos.x, player.pos.y, player.pos.z],
+      yaw: player.yaw, pitch: player.pitch,
       time: dayTime,
       sel: inventory.selected,
       hp: player.health,
       hunger: player.hunger,
       sat: player.saturation,
+      air: player.air,
+      flying: player.flying,
       drops,
     }));
   } catch (e) {
@@ -1221,26 +1247,45 @@ function saveSoon() {
   if (_saveTimer) return;
   _saveTimer = setTimeout(() => { _saveTimer = null; save(); }, 800);
 }
+// Read the saved blob (or null). Kept separate so both the singleplayer and
+// the multiplayer join paths can restore the player without rebuilding world.
+function readSave() {
+  try { const raw = localStorage.getItem(SAVE_KEY); return raw ? JSON.parse(raw) : null; }
+  catch (e) { console.warn('nomaecraft read failed:', e?.message); return null; }
+}
+// Apply saved player-centric state (inventory, position, look, stats, drops)
+// onto the EXISTING world/player. Does not touch world blocks — in multiplayer
+// those arrive over the network; in singleplayer loadSave() applies them first.
+// Safe to call more than once (handles the join race); drops only spawn once.
+function restorePlayerState(d) {
+  if (!d) return false;
+  if (Array.isArray(d.inv)) inventory.load(d.inv);
+  if (typeof d.sel === 'number') inventory.selected = d.sel;
+  if (Array.isArray(d.pos)) { player.pos.set(d.pos[0], d.pos[1], d.pos[2]); player.spawn.copy(player.pos); }
+  if (typeof d.yaw === 'number') player.yaw = d.yaw;
+  if (typeof d.pitch === 'number') player.pitch = d.pitch;
+  if (typeof d.hp === 'number') player.health = d.hp;
+  if (typeof d.hunger === 'number') player.hunger = d.hunger;
+  if (typeof d.sat === 'number') player.saturation = d.sat;
+  if (typeof d.air === 'number') player.air = d.air;
+  if (typeof d.flying === 'boolean') player.flying = d.flying;
+  if (typeof d.time === 'number') dayTime = d.time;
+  // never load in as a corpse — a dead save would lock the player out
+  player.dead = false;
+  if (player.health <= 0) player.health = player.maxHealth;
+  player.vel.set(0, 0, 0);
+  if (Array.isArray(d.drops) && !_dropsRestored) {
+    for (const dr of d.drops) dropMgr.spawn(dr.id, dr.n, { x: dr.x, y: dr.y, z: dr.z });
+    _dropsRestored = true;
+  }
+  return true;
+}
 function loadSave() {
+  const d = readSave(); if (!d) return false;
   try {
-    const raw = localStorage.getItem(SAVE_KEY); if (!raw) return false;
-    const d = JSON.parse(raw);
     rebuildWorld(d.seed);
-    for (const [k, b] of d.edits) { const [x, y, z] = k.split(',').map(Number); world.setBlock(x, y, z, b, true); if (b === BLOCK.TORCH) torchSet.add(k); }
-    inventory.load(d.inv);
-    if (typeof d.sel === 'number') inventory.selected = d.sel;
-    player.pos.set(d.pos[0], d.pos[1], d.pos[2]);
-    player.spawn.copy(player.pos);
-    if (typeof d.hp === 'number') player.health = d.hp;
-    if (typeof d.hunger === 'number') player.hunger = d.hunger;
-    if (typeof d.sat === 'number') player.saturation = d.sat;
-    dayTime = d.time || 60;
-    // restore world-entity dropped items
-    if (Array.isArray(d.drops)) {
-      for (const dr of d.drops) {
-        dropMgr.spawn(dr.id, dr.n, { x: dr.x, y: dr.y, z: dr.z });
-      }
-    }
+    for (const [k, b] of (d.edits || [])) { const [x, y, z] = k.split(',').map(Number); world.setBlock(x, y, z, b, true); if (b === BLOCK.TORCH) torchSet.add(k); }
+    restorePlayerState(d);
     return true;
   } catch (e) {
     console.warn('nomaecraft load failed:', e?.message);
