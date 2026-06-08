@@ -366,13 +366,21 @@ const healthEl = document.getElementById('health');
 const hungerEl = document.getElementById('hunger');
 const airEl = document.getElementById('air');
 
+// Build a data: URI that's safe to drop into an UNQUOTED css url(...).
+// encodeURIComponent leaves ' ( ) literal, and a bare url() can't contain
+// those — so the browser was rejecting the whole background-image rule and
+// the health/hunger/air bars never showed. Encode them explicitly here.
+function svgURI(svg) {
+  return 'data:image/svg+xml,' + encodeURIComponent(svg)
+    .replace(/'/g, '%27').replace(/\(/g, '%28').replace(/\)/g, '%29');
+}
 function heartSVG(fill) { // fill 0..1
   const c = fill >= 1 ? '#e23' : fill > 0 ? '#e23' : '#400';
-  return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M8 14 1 7a3.5 3.5 0 0 1 5-5l2 2 2-2a3.5 3.5 0 0 1 5 5z' fill='${c}' stroke='black' stroke-width='1'/>${fill > 0 && fill < 1 ? "<rect x='8' y='0' width='8' height='16' fill='%23400' opacity='0.0'/>" : ''}</svg>`)}`;
+  return svgURI(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M8 14 1 7a3.5 3.5 0 0 1 5-5l2 2 2-2a3.5 3.5 0 0 1 5 5z' fill='${c}' stroke='black' stroke-width='1'/>${fill > 0 && fill < 1 ? "<rect x='8' y='0' width='8' height='16' fill='%23400' opacity='0.0'/>" : ''}</svg>`);
 }
-function emptyHeart() { return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M8 14 1 7a3.5 3.5 0 0 1 5-5l2 2 2-2a3.5 3.5 0 0 1 5 5z' fill='%23300' stroke='black' stroke-width='1'/></svg>`)}`; }
-function legSVG(c) { return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><ellipse cx='8' cy='9' rx='6' ry='4' fill='${c}' stroke='black'/><rect x='6' y='12' width='4' height='3' fill='white'/></svg>`)}`; }
-function bubbleSVG() { return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%237ec8ff' stroke='black'/></svg>`)}`; }
+function emptyHeart() { return svgURI(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M8 14 1 7a3.5 3.5 0 0 1 5-5l2 2 2-2a3.5 3.5 0 0 1 5 5z' fill='%23300' stroke='black' stroke-width='1'/></svg>`); }
+function legSVG(c) { return svgURI(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><ellipse cx='8' cy='9' rx='6' ry='4' fill='${c}' stroke='black'/><rect x='6' y='12' width='4' height='3' fill='white'/></svg>`); }
+function bubbleSVG() { return svgURI(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%237ec8ff' stroke='black'/></svg>`); }
 
 function renderHUD() {
   // health: 10 hearts = 20 hp
