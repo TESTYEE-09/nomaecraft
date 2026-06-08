@@ -500,12 +500,12 @@ function mineUpdate(dt) {
   crackPlane.visible = true;
   if (breakProgress >= 1) {
     breakProgress = 0; breakTarget = null; crackPlane.visible = false; currentCrackStage = -1;
-    // spawn drops as world entities (instead of adding straight to inventory)
+    setBlockShared(hit.hit.x, hit.hit.y, hit.hit.z, BLOCK.AIR);
+    // spawn drops after block removal so ground scan finds the right floor
     for (const [id, n] of dropsFor(hit.block, tool)) {
       dropMgr.spawn(id, n, { x: hit.hit.x + 0.5, y: hit.hit.y + 0.9, z: hit.hit.z + 0.5 },
                             { x: (Math.random() - 0.5) * 1.4, y: 1.5, z: (Math.random() - 0.5) * 1.4 });
     }
-    setBlockShared(hit.hit.x, hit.hit.y, hit.hit.z, BLOCK.AIR);
     Audio.playBreak(Audio.blockMaterial(hit.block));
     if (tool.item && tool.type !== TOOL.HAND) {
       tool.item.dura = (tool.item.dura ?? ITEMS[tool.item.id].tool.dura) - 1;
@@ -1378,7 +1378,7 @@ function loop(now) {
   // A "held tool" means the selected hotbar slot has a tool item that ISN'T
   // a gun. The bare arm still shows when the player holds a block, food,
   // torch, etc.
-  const heldToolInfo = !gunOut && heldTool ? parseToolId(heldTool.id) : null;
+  const heldToolInfo = !gunOut ? parseToolId(heldTool.item?.id) : null;
   armGroup.visible = !gunOut && !heldToolInfo;
   gunGroup.visible = gunOut;
   toolGroup.visible = !!heldToolInfo;

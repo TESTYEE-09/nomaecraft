@@ -46,8 +46,8 @@ export class Inventory {
 
   // Backward-compatible: 2-tuple [id, count] is the v1 format; 3-tuple
   // [id, count, dura] is the v2 format and preserves tool durability.
-  serialize() { return this.slots.map(s => s ? (s.dura !== undefined ? [s.id, s.count, s.dura] : [s.id, s.count]) : null); }
-  load(arr) { if (arr) this.slots = arr.map(s => s ? { id: s[0], count: s[1], dura: s[2] } : null); }
+  serialize() { return this.slots.map(s => { if (!s) return null; const t = [s.id, s.count]; if (s.dura !== undefined) t.push(s.dura); if (s.ammo !== undefined) { if (t.length < 3) t.push(undefined); t.push(s.ammo); } return t; }); }
+  load(arr) { if (arr) this.slots = arr.map(s => { if (!s) return null; const o = { id: s[0], count: s[1] }; if (s[2] !== undefined) o.dura = s[2]; if (s[3] !== undefined) o.ammo = s[3]; return o; }); }
 }
 
 // Crafting: grid is an array of length 4 (2x2) or 9 (3x3) of item ids or null.
