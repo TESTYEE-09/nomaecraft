@@ -6,11 +6,11 @@
 import { BLOCK, blockDefs } from './blocks.js';
 import { ITEMS } from './items.js';
 
-const PICKUP_RADIUS = 1.5;
+const PICKUP_RADIUS = 1.6;          // generous — items on the ground are within reach
 const PICKUP_RADIUS_SQ = PICKUP_RADIUS * PICKUP_RADIUS;
 const DESPAWN = 300;            // 5 minutes
-const MAGNET_DIST = 1.2;        // start homing in once this close
-const MAGNET_SPEED = 4.0;
+const MAGNET_DIST = 2.0;        // start homing in once this close (was 1.2 — too short)
+const MAGNET_SPEED = 6.0;       // faster pull (was 4.0)
 
 let _nextId = 1;
 
@@ -106,16 +106,22 @@ export class Drop {
       this.onGround = true;
     }
 
-    // mild magnetic pull once the player gets close
+    // mild magnetic pull once the player gets close. Doesn't require
+    // onGround anymore — if a drop pops into the air near the player we
+    // still want it to home in (otherwise it can land 2+ blocks away
+    // and be just outside the pickup circle).
     const dx = player.pos.x - this.pos.x;
     const dy = (player.pos.y + 0.9) - this.pos.y;
     const dz = player.pos.z - this.pos.z;
     const distSq = dx * dx + dy * dy + dz * dz;
-    if (distSq < MAGNET_DIST * MAGNET_DIST && this.onGround) {
+    if (distSq < MAGNET_DIST * MAGNET_DIST) {
       const dist = Math.sqrt(distSq) || 1;
-      this.vel.x += (dx / dist) * MAGNET_SPEED * dt;
-      this.vel.y += (dy / dist) * MAGNET_SPEED * dt;
-      this.vel.z += (dz / dist) * MAGNET_SPEED * dt;
+      // Stronger pull as the drop gets closer (1/r falloff clamped) so
+      // distant items accelerate but very-close ones snap in fast.
+      const pull = MAGNET_SPEED * (1 + (1 - dist / MAGNET_DIST));
+      this.vel.x += (dx / dist) * pull * dt;
+      this.vel.y += (dy / dist) * pull * dt;
+      this.vel.z += (dz / dist) * pull * dt;
     }
 
     // billboard: face the player horizontally, with a tilt
