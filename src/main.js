@@ -1493,6 +1493,8 @@ window.nomae = {
   block: (x, y, z) => world.getBlock(x, y, z),
   look: (pitch, yaw) => { player.pitch = pitch; if (yaw !== undefined) player.yaw = yaw; return 'looking'; },
   mineAimed: () => { if (!currentTarget) return 'no block in view'; const t = selectedTool(); const drops = dropsFor(currentTarget.block, t); for (const [id, n] of drops) inventory.add(id, n); const b = currentTarget.block; setBlockShared(currentTarget.hit.x, currentTarget.hit.y, currentTarget.hit.z, BLOCK.AIR); renderHotbar(); return { mined: b, got: drops }; },
+  drop: (id = 'dirt', n = 1) => { const d = dropMgr.spawn(id, n, { x: player.pos.x, y: player.pos.y + 0.5, z: player.pos.z }, { x: 0, y: 0.5, z: 0 }); return d ? 'dropped ' + n + ' ' + id : 'spawn failed'; },
+  drops: () => dropMgr.drops.map(d => ({ id: d.itemId, n: d.count, pos: [d.pos.x.toFixed(1), d.pos.y.toFixed(1), d.pos.z.toFixed(1)], onGround: d.onGround })),
   save: () => { save(); return 'saved'; },
   saveInfo: () => { const raw = localStorage.getItem(SAVE_KEY); if (!raw) return 'no save'; const d = JSON.parse(raw); return { v: d.v, seed: d.seed, edits: d.edits?.length, invItems: d.inv?.filter(Boolean).length, pos: d.pos, time: d.time?.toFixed(0), sel: d.sel, hp: d.hp, hunger: d.hunger, drops: d.drops?.length || 0, bytes: raw.length }; },
 };
