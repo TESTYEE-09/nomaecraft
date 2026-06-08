@@ -8,7 +8,10 @@ const PREFIX = 'nomaecraft-';
 // Signal servers — tried in order. First is our own Render deploy.
 const SIGNAL_SERVERS = [
   { host: 'nomaecraft-signal.onrender.com', port: 443, secure: true, path: '/' },
-  { host: '0.peerjs.com', port: 443, secure: true, path: '/' },
+  // PeerJS public broker. Path is /peerjs (not /) — that's the broker's
+  // well-known endpoint. The 0.peerjs.com root returns 404 and would mask
+  // a real working broker.
+  { host: '0.peerjs.com', port: 443, secure: true, path: '/peerjs' },
 ];
 
 const ICE_SERVERS = [
@@ -49,10 +52,18 @@ export class Net {
   }
 
   async _tryConnect(room) {
+    // 1) Try to join the existing host. If we succeed, done.
+    // 2) If joining fails because the signal server is down / cold-starting,
+    //    rotate to the next signal server (don't fall through to "host").
+    // 3) If joining fails because the host simply isn't there (peer-unavailable
+    //    with a working socket), become the host on this same signal server.
+    // 4) Hosting can also fail with signal-down on a cold Render; retry
+    //    hosting a few times on the same server before rotating.
     for (let si = 0; si < SIGNAL_SERVERS.length; si++) {
       this._serverIdx = si;
       const srvName = SIGNAL_SERVERS[si].host;
-      this._log('Trying server: ' + srvName);
+      // Up to 2 join attempts per server — Render's free tier cold-starts
+      // can take ~15s on the very first hit, so one quick try isn't enough.
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           await this.join(room);
@@ -60,14 +71,31 @@ export class Net {
           return 'joined';
         } catch (e) {
           this.close();
-          try {
-            await this.host(room);
-            this._log('Hosting via ' + srvName);
-            return 'hosting';
-          } catch (e2) {
-            this.close();
-            await new Promise(r => setTimeout(r, 500 + Math.random() * 800));
+          if (e.signalDown) {
+            this._log('Signal down on ' + srvName + ' (' + e.message + ') — rotating');
+            break; // rotate to next server
           }
+          // Socket was up but host wasn't there — try hosting on this same
+          // server. Cold Render can also reject the host claim, so try a
+          // couple times before giving up on this server.
+          let hosted = false;
+          for (let ha = 0; ha < 2; ha++) {
+            try {
+              await this.host(room);
+              this._log('Hosting via ' + srvName);
+              return 'hosting';
+            } catch (e2) {
+              this.close();
+              if (e2.signalDown || /unavailable-id|Signal/i.test(e2.message)) {
+                await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
+                continue;
+              }
+              throw e2;
+            }
+          }
+          // Hosting kept failing on this server — rotate.
+          this._log('Could not host on ' + srvName + ' — rotating');
+          break;
         }
       }
     }
@@ -99,12 +127,25 @@ export class Net {
       const id = PREFIX + roomCode;
       this.peer = this._newPeer(id);
       this.myId = id;
-      this.peer.on('open', () => { this.connected = true; resolve(roomCode); });
+      let done = false;
+      const fail = (msg, signalDown) => {
+        if (done) return;
+        done = true;
+        const e = new Error(msg);
+        e.signalDown = !!signalDown;
+        reject(e);
+      };
+      this.peer.on('open', () => { this.connected = true; if (!done) { done = true; resolve(roomCode); } });
       this.peer.on('error', (e) => {
-        if (e.type === 'unavailable-id') reject(new Error('Room code taken — pick another.'));
-        else reject(e);
+        // 'unavailable-id' = someone else already grabbed this id; not a
+        // signal-server problem. 'network' / 'server-error' / 'socket-error' /
+        // 'ssl-unavailable' / 'browser-incompatible' = signal server is sick.
+        if (e.type === 'unavailable-id') fail('Room code taken — pick another.');
+        else fail('Signal error: ' + (e.type || e.message), true);
       });
       this.peer.on('connection', (conn) => this._onHostConn(conn));
+      // Same cold-start cushion as join().
+      setTimeout(() => fail('Signal server unreachable.', true), 15000);
     });
   }
 
@@ -138,9 +179,23 @@ export class Net {
       this.isHost = false;
       this.room = roomCode;
       let done = false;
-      const fail = (msg) => { if (!done) { done = true; reject(new Error(msg)); } };
+      // Track whether the peer socket itself ever opened. If it did NOT open
+      // by the time we fail, the signal server is the problem (timeout /
+      // network / server-error) and the caller should rotate to the next
+      // signal server. If it DID open, then the only remaining failure is
+      // "host isn't here" and the caller should host instead.
+      let peerOpened = false;
+      const fail = (msg, signalDown) => {
+        if (done) return;
+        done = true;
+        // Wrap the error with a hint so the retry loop can tell them apart.
+        const e = new Error(msg);
+        e.signalDown = !!signalDown || !peerOpened;
+        reject(e);
+      };
       this.peer = this._newPeer(null);
       this.peer.on('open', (myid) => {
+        peerOpened = true;
         this.myId = myid;
         const conn = this.peer.connect(PREFIX + roomCode, { reliable: true });
         this.host_conn = conn;
@@ -153,9 +208,17 @@ export class Net {
         conn.on('close', () => { this.connected = false; if (this._shared) this._migrate(); else this.h.onChat('system', 'Disconnected from host.'); });
         setTimeout(() => fail('Connection timed out.'), 8000);
       });
-      this.peer.on('error', (e) => fail(e.type === 'peer-unavailable' ? 'No host found.' : 'Signal error: ' + (e.type || e.message)));
-      // if the peer itself can't connect to the signal server, fail fast
-      setTimeout(() => fail('Signal server unreachable.'), 6000);
+      this.peer.on('error', (e) => {
+        // 'peer-unavailable' means the socket is up, the host just isn't
+        // there — caller should host. Anything else (network, server-error,
+        // socket-error, ssl-unavailable, browser-incompatible) means the
+        // signal server itself is the problem — rotate.
+        if (e.type === 'peer-unavailable') fail('No host found.');
+        else fail('Signal error: ' + (e.type || e.message), true);
+      });
+      // If the peer socket never opens at all, the signal server is dead.
+      // Give Render's free-tier cold start a real chance (15s).
+      setTimeout(() => fail('Signal server unreachable.', true), 15000);
     });
   }
 
