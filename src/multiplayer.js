@@ -19,6 +19,14 @@ const ICE_SERVERS = [
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
   { urls: 'stun:stun.cloudflare.com:3478' },
+  // TURN relays — REQUIRED for players behind symmetric NAT / strict
+  // firewalls where STUN alone can't punch a direct path. Without these,
+  // such players' data channels never open and they can never join.
+  // Public OpenRelay (metered.ca) credentials; ports 80/443 + a TCP
+  // fallback so it works even on networks that only allow outbound 443.
+  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 
 export class Net {
@@ -64,7 +72,7 @@ export class Net {
       const srvName = SIGNAL_SERVERS[si].host;
       // Up to 2 join attempts per server — Render's free tier cold-starts
       // can take ~15s on the very first hit, so one quick try isn't enough.
-      for (let attempt = 0; attempt < 2; attempt++) {
+      for (let attempt = 0; attempt < 3; attempt++) {
         try {
           await this.join(room);
           this._log('Joined via ' + srvName);
@@ -78,7 +86,7 @@ export class Net {
           // Socket was up but host wasn't there — try hosting on this same
           // server. Cold Render can also reject the host claim, so try a
           // couple times before giving up on this server.
-          let hosted = false;
+          let raceLost = false;
           for (let ha = 0; ha < 2; ha++) {
             try {
               await this.host(room);
@@ -86,12 +94,25 @@ export class Net {
               return 'hosting';
             } catch (e2) {
               this.close();
-              if (e2.signalDown || /unavailable-id|Signal/i.test(e2.message)) {
+              if (e2.idTaken) {
+                // Someone else won the host race (or was already hosting and
+                // our join just missed them). Go back and JOIN them rather
+                // than erroring out — this was the main "can't join" bug.
+                this._log('Host already taken on ' + srvName + ' — retrying join');
+                raceLost = true;
+                break;
+              }
+              if (e2.signalDown) {
                 await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
-                continue;
+                continue; // cold-start hiccup — retry hosting
               }
               throw e2;
             }
+          }
+          if (raceLost) {
+            // small pause so the winner's socket is fully open, then re-join
+            await new Promise(r => setTimeout(r, 400 + Math.random() * 600));
+            continue; // retry the outer join attempt on this same server
           }
           // Hosting kept failing on this server — rotate.
           this._log('Could not host on ' + srvName + ' — rotating');
@@ -128,24 +149,27 @@ export class Net {
       this.peer = this._newPeer(id);
       this.myId = id;
       let done = false;
-      const fail = (msg, signalDown) => {
+      const fail = (msg, opts = {}) => {
         if (done) return;
         done = true;
         const e = new Error(msg);
-        e.signalDown = !!signalDown;
+        e.signalDown = !!opts.signalDown;
+        e.idTaken = !!opts.idTaken;
         reject(e);
       };
       this.peer.on('open', () => { this.connected = true; if (!done) { done = true; resolve(roomCode); } });
       this.peer.on('error', (e) => {
-        // 'unavailable-id' = someone else already grabbed this id; not a
-        // signal-server problem. 'network' / 'server-error' / 'socket-error' /
-        // 'ssl-unavailable' / 'browser-incompatible' = signal server is sick.
-        if (e.type === 'unavailable-id') fail('Room code taken — pick another.');
-        else fail('Signal error: ' + (e.type || e.message), true);
+        // 'unavailable-id' = someone else already grabbed this id (they won the
+        // host race / are already hosting). NOT a signal-server problem — the
+        // caller should go back and JOIN that host instead of erroring out.
+        // 'network' / 'server-error' / 'socket-error' / 'ssl-unavailable' /
+        // 'browser-incompatible' = signal server is sick → rotate.
+        if (e.type === 'unavailable-id') fail('Someone is already hosting.', { idTaken: true });
+        else fail('Signal error: ' + (e.type || e.message), { signalDown: true });
       });
       this.peer.on('connection', (conn) => this._onHostConn(conn));
       // Same cold-start cushion as join().
-      setTimeout(() => fail('Signal server unreachable.', true), 15000);
+      setTimeout(() => fail('Signal server unreachable.', { signalDown: true }), 15000);
     });
   }
 
