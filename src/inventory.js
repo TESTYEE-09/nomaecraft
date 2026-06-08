@@ -57,44 +57,31 @@ export class Inventory {
 export function matchRecipe(grid, size /* 2 or 3 */) {
   for (const r of RECIPES) {
     if (r.type === 'shapeless') {
-      // Shapeless recipes fire if the grid CONTAINS at least the required
-      // ingredients (multiset contains-check). Extras in the grid are
-      // ignored — they're just leftover material. This matters in the 3x3
-      // crafting-grid: dumping 9 planks and expecting 4 sticks works,
-      // because the grid has ≥ 2 planks even though it has 9 items total.
+      // Shapeless recipes require an EXACT ingredient match (like vanilla):
+      // the grid must contain precisely the listed ingredients and nothing
+      // else. The old "extras allowed" rule was a critical bug — putting 4
+      // planks in the grid to make a crafting table matched the stick recipe
+      // first (2 planks needed, extra planks "allowed"), so you could never
+      // craft a table and were blocked from all tools.
       const have = grid.filter(Boolean);
-      // Build a multiset of what the grid actually contains.
-      const counts = Object.create(null);
-      for (const id of have) counts[id] = (counts[id] ?? 0) + 1;
       // Recipe requirement as a multiset.
       const need = Object.create(null);
       for (const id of r.ingredients) need[id] = (need[id] ?? 0) + 1;
-      // A shapeless recipe matches when the grid has AT LEAST the recipe's
-      // ingredients. Extras are fine, BUT they must be of an id that the
-      // recipe already uses — otherwise a 3x3 grid full of mixed junk
-      // would match a stick recipe just because it has 2 planks in it.
-      // (Same rule vanilla MC uses for shapeless: extras must "be the same
-      //  as something already in the recipe" — well, vanilla is even
-      // stricter, requiring exact-match, but the relaxed version still
-      // produces sensible behavior in the 3x3 case where the player has
-      // dumped a stack of planks.)
+      // Fast reject: total item count must equal the recipe's ingredient count.
+      if (have.length !== r.ingredients.length) continue;
+      // Build a multiset of what the grid actually contains.
+      const counts = Object.create(null);
+      for (const id of have) counts[id] = (counts[id] ?? 0) + 1;
+      // Every id must match exactly (same keys, same counts). Since totals
+      // are already equal, checking that each needed id has the right count
+      // is sufficient to guarantee no extras of any other id.
       let ok = true;
       for (const id in need) {
-        if ((counts[id] ?? 0) < need[id]) { ok = false; break; }
-      }
-      if (ok) {
-        // Verify every "extra" item in the grid is of an id the recipe uses.
-        // Subtract what the recipe needs; any remaining id is an extra; if
-        // that id isn't in the recipe's own id-set, the recipe shouldn't fire.
-        for (const id in counts) {
-          const extra = counts[id] - (need[id] ?? 0);
-          if (extra > 0 && need[id] === undefined) { ok = false; break; }
-        }
+        if ((counts[id] ?? 0) !== need[id]) { ok = false; break; }
       }
       if (ok) {
         // Build the consume list (one entry per ingredient, by id) so
-        // takeCraft() knows exactly which slots to decrement — not "every
-        // non-null slot" (which would over-consume when the grid has extras).
+        // takeCraft() knows exactly which slots to decrement.
         const consume = [];
         for (const id in need) for (let k = 0; k < need[id]; k++) consume.push(id);
         return { out: r.out, count: r.count, consume };
