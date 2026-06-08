@@ -98,6 +98,113 @@ camera.add(armGroup);
 scene.add(camera); // needed so camera children render
 let armSwingT = 0; // continuous swing timer when mining
 
+// ---------------------------------------------------------------------------
+// First-person held-tool models (pickaxe / axe / shovel / sword, all 5 tiers)
+// Built once, parented to the camera, only the active one is visible per
+// frame. Without this, picking a slot that has a tool just shows the bare
+// arm — players had no idea their tool was selected. Each (kind, tier) gets
+// its own Group with a stick handle plus a head shaped/colored for that
+// tool and tier.
+// ---------------------------------------------------------------------------
+const TOOL_TIERS = ['wood', 'stone', 'iron', 'gold', 'diamond'];
+const TOOL_TIER_COLORS = {
+  wood: 0x9a7440, stone: 0x888888, iron: 0xd9c4b0, gold: 0xf3d23a, diamond: 0x4fe6dd,
+};
+const TOOL_TIER_HEAD_MAT = {}; // built below
+for (const t of TOOL_TIERS) {
+  TOOL_TIER_HEAD_MAT[t] = new THREE.MeshLambertMaterial({ color: TOOL_TIER_COLORS[t] });
+}
+const TOOL_HANDLE_MAT = new THREE.MeshLambertMaterial({ color: 0x6a4a25 });
+// dark accent stripe along the handle — also used for axe eye / sword guard
+const TOOL_TRIM_MAT = new THREE.MeshLambertMaterial({ color: 0x4a3318 });
+
+// toolGroup contains every (kind, tier) model. Each is positioned so the
+// hand-grip end of the handle is at the hand bone (matches bare-arm hand
+// position) and the head extends forward+up in front of the camera.
+const toolGroup = new THREE.Group();
+toolGroup.position.set(0.42, -0.38, -0.55);
+camera.add(toolGroup);
+const toolMeshes = new Map(); // "kind|tier" -> Group
+
+function buildToolModel(kind, tier) {
+  const g = new THREE.Group();
+  // handle — a 0.06 × 0.42 × 0.06 stick, oriented along Y. The bottom of
+  // the handle sits at y=0 (hand position); the head sits above at y≈0.5.
+  const handleLen = 0.42, handleW = 0.06;
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(handleW, handleLen, handleW), TOOL_HANDLE_MAT);
+  handle.position.y = handleLen / 2;
+  g.add(handle);
+  // trim ring near the bottom of the handle
+  const trim = new THREE.Mesh(new THREE.BoxGeometry(handleW * 1.25, 0.02, handleW * 1.25), TOOL_TRIM_MAT);
+  trim.position.y = 0.06;
+  g.add(trim);
+
+  const headMat = TOOL_TIER_HEAD_MAT[tier];
+  if (kind === 'pickaxe') {
+    // head: horizontal bar across +Z, like a real pickaxe
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.34), headMat);
+    bar.position.y = handleLen + 0.04;
+    g.add(bar);
+    // a tiny peak sticking forward — distinguishes it from a hammer
+    const tip = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.07), headMat);
+    tip.position.set(0, handleLen + 0.04, -0.18);
+    g.add(tip);
+  } else if (kind === 'axe') {
+    // axe head: chunky blade on the +Z side, sits flush with the handle
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.22, 0.18), headMat);
+    blade.position.set(0, handleLen + 0.08, 0.04);
+    g.add(blade);
+    // eye / socket — a darker block where the head meets the handle
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.08, 0.05), TOOL_TRIM_MAT);
+    eye.position.set(0, handleLen + 0.0, 0.02);
+    g.add(eye);
+  } else if (kind === 'shovel') {
+    // shovel head: flat blade tilted slightly forward
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.18, 0.04), headMat);
+    blade.position.set(0, handleLen + 0.10, 0.04);
+    blade.rotation.x = -0.25;
+    g.add(blade);
+    // socket block where blade meets handle
+    const socket = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.06, 0.06), TOOL_TRIM_MAT);
+    socket.position.set(0, handleLen + 0.02, 0.02);
+    g.add(socket);
+  } else if (kind === 'sword') {
+    // blade: long thin box tilted slightly forward
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.55, 0.05), headMat);
+    blade.position.y = handleLen + 0.32;
+    blade.rotation.x = 0.08;
+    g.add(blade);
+    // crossguard: horizontal bar just above the handle
+    const guard = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.04, 0.06), TOOL_TRIM_MAT);
+    guard.position.set(0, handleLen + 0.02, 0.0);
+    g.add(guard);
+    // pommel: small block at the bottom of the handle
+    const pommel = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.05, 0.07), TOOL_TRIM_MAT);
+    pommel.position.y = -0.01;
+    g.add(pommel);
+  }
+  g.visible = false;
+  return g;
+}
+for (const kind of ['pickaxe', 'axe', 'shovel', 'sword']) {
+  for (const tier of TOOL_TIERS) {
+    const m = buildToolModel(kind, tier);
+    toolGroup.add(m);
+    toolMeshes.set(kind + '|' + tier, m);
+  }
+}
+
+// Pulled out of selectedTool()'s id to drive the held-tool swap.
+function parseToolId(id) {
+  if (!id) return null;
+  for (const tier of TOOL_TIERS) {
+    for (const kind of ['pickaxe', 'axe', 'shovel', 'sword']) {
+      if (id === tier + '_' + kind) return { kind, tier };
+    }
+  }
+  return null;
+}
+
 // First-person gun model (attached to camera, shown when pistol is selected)
 const gunGroup = new THREE.Group();
 const gunMetal = new THREE.MeshLambertMaterial({ color: 0x2a2a2a });
@@ -898,8 +1005,17 @@ function renderHeld() {
 
 function takeCraft() {
   if (!craftResult) return;
-  // consume one of each ingredient
-  for (let i = 0; i < craftSlots.length; i++) if (craftSlots[i]) { craftSlots[i].count--; if (craftSlots[i].count <= 0) craftSlots[i] = null; }
+  // Consume only the ingredients the recipe actually requires. We walk
+  // `consume` (a list of item ids) and decrement the first matching slot
+  // for each. Extras in the grid stay where they are.
+  if (craftResult.consume) {
+    for (const need of craftResult.consume) {
+      for (let i = 0; i < craftSlots.length; i++) {
+        const s = craftSlots[i];
+        if (s && s.id === need) { s.count--; if (s.count <= 0) craftSlots[i] = null; break; }
+      }
+    }
+  }
   const out = craftResult;
   const item = { id: out.out, count: out.count };
   if (ITEMS[out.out].tool) item.dura = ITEMS[out.out].tool.dura;
@@ -1256,10 +1372,20 @@ function loop(now) {
   // underwater overlay
   document.getElementById('underwater').classList.toggle('show', player.headInWater());
 
-  // first-person arm + gun model
+  // first-person arm + tool + gun model
   const gunOut = isGunSelected();
-  armGroup.visible = !gunOut;
+  const heldTool = selectedTool();
+  // A "held tool" means the selected hotbar slot has a tool item that ISN'T
+  // a gun. The bare arm still shows when the player holds a block, food,
+  // torch, etc.
+  const heldToolInfo = !gunOut && heldTool ? parseToolId(heldTool.id) : null;
+  armGroup.visible = !gunOut && !heldToolInfo;
   gunGroup.visible = gunOut;
+  toolGroup.visible = !!heldToolInfo;
+  if (heldToolInfo) {
+    // Only the matching (kind, tier) mesh is visible; hide all the others.
+    for (const [k, m] of toolMeshes) m.visible = (k === heldToolInfo.kind + '|' + heldToolInfo.tier);
+  }
 
   if (gunOut) {
     // gun recoil animation
@@ -1278,6 +1404,19 @@ function loop(now) {
     const sway = performance.now() * 0.001;
     gunGroup.rotation.z = Math.sin(sway * 1.1) * 0.008;
     gunGroup.rotation.y = Math.sin(sway * 0.9) * 0.005;
+  } else if (heldToolInfo) {
+    // held tool — same swing pattern as the bare arm, just on toolGroup.
+    if (attackAnim > 0) {
+      const t = 1 - (attackAnim / 0.25);
+      toolGroup.rotation.x = -1.2 * (1 - t * t);
+      armSwingT = 0;
+    } else if (mining && currentTarget) {
+      armSwingT += dt * 7;
+      toolGroup.rotation.x = Math.sin(armSwingT) * 0.7;
+    } else {
+      toolGroup.rotation.x *= 0.85;
+      armSwingT = 0;
+    }
   } else {
     // arm animation
     if (attackAnim > 0) {

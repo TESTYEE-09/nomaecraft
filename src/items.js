@@ -41,6 +41,18 @@ reg('iron', { name: 'Iron Ingot', draw: matIcon('#d9c4b0', 'ingot') });
 reg('gold', { name: 'Gold Ingot', draw: matIcon('#f3d23a', 'ingot') });
 reg('diamond', { name: 'Diamond', draw: matIcon('#4fe6dd', 'gem') });
 reg('stick', { name: 'Stick', draw: matIcon('#7a5a30', 'stick') });
+// String — spider drop. Drawn as a small white tangled loop.
+reg('string', { name: 'String', max: 64, draw: (ctx) => {
+  ctx.clearRect(0, 0, 32, 32);
+  ctx.strokeStyle = '#f0f0f0'; ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+  // two interleaving loops
+  ctx.beginPath();
+  ctx.ellipse(16, 16, 9, 6, 0, 0, Math.PI * 2);
+  ctx.ellipse(16, 16, 7, 9, Math.PI / 4, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = '#f0f0f0'; ctx.beginPath(); ctx.arc(10, 12, 1.2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(22, 18, 1.2, 0, Math.PI * 2); ctx.fill();
+}});
 
 // ---- food ----
 function appleIcon(ctx) {

@@ -4,7 +4,16 @@ import { BLOCK, blockDefs } from './blocks.js';
 const MOB_TYPES = {
   pig:   { hostile: false, hp: 10, color: 0xe89aa0, headColor: 0xe79aa0, legColor: 0xc97f86, snout: 0xd0697a, height: 0.9, width: 0.9, speed: 1.6, drop: 'raw_meat', dropN: [1, 3] },
   cow:   { hostile: false, hp: 10, color: 0x59453a, headColor: 0x4a3525, legColor: 0x3a2a1d, snout: 0xd9a6ac, horns: true, height: 1.4, width: 0.9, speed: 1.4, drop: 'raw_meat', dropN: [1, 3] },
+  // Zombie: classic slow night-stumbling melee hostile. Bumps into you.
   zombie:{ hostile: true,  hp: 20, color: 0x4a7a3a, headColor: 0x6c9a4c, legColor: 0x33485f, arms: true, height: 1.8, width: 0.6, speed: 2.6, drop: 'raw_meat', dropN: [0, 1], attack: 3, range: 1.5 },
+  // Skeleton: bony ranged hostile. Stops at 6-12 blocks to shoot arrows.
+  // Ranged attack uses a line trace toward the player (cheap "arrow" — no
+  // physical projectile, same effect on the player). Less HP than zombie
+  // because it can keep its distance.
+  skeleton: { hostile: true, hp: 16, color: 0xe8e4d0, headColor: 0xf2eed8, legColor: 0xc6c0a8, arms: true, bony: true, height: 1.8, width: 0.55, speed: 2.8, attack: 0, range: 1.0, ranged: { damage: 2, range: 11, fireCD: 1.4 } },
+  // Spider: bigger, faster, jumps erratically. Bites at melee range for
+  // more damage than the zombie. Harder to kite in open ground.
+  spider: { hostile: true, hp: 18, color: 0x4a2a2a, headColor: 0x3a1a1a, legColor: 0x2a1212, eyes: true, height: 1.0, width: 1.4, speed: 3.6, drop: 'string', dropN: [0, 2], attack: 4, range: 1.7, jumpy: true },
 };
 
 let nextId = 1;
@@ -77,6 +86,13 @@ export class Mob {
       const eye = new THREE.Mesh(new THREE.BoxGeometry(hs * 0.2, hs * 0.2, 0.04), eyeMat);
       eye.position.set(sx * hs * 0.24, hs * 0.12, faceZ + 0.01); this.head.add(eye);
     }
+    // spider gets a second pair of small red eyes for the "creepy" look
+    if (d.eyes) {
+      for (const sx of [-1, 1]) {
+        const eye = new THREE.Mesh(new THREE.BoxGeometry(hs * 0.12, hs * 0.12, 0.04), eyeMat);
+        eye.position.set(sx * hs * 0.22, -hs * 0.04, faceZ + 0.01); this.head.add(eye);
+      }
+    }
     // snout / muzzle
     if (d.snout) {
       const snoutMat = new THREE.MeshLambertMaterial({ color: d.snout });
@@ -125,6 +141,26 @@ export class Mob {
 
   isSolid(x, y, z) { const b = this.world.getBlock(x, y, z); const def = blockDefs[b]; return def && def.solid; }
 
+  // True if a line from mob-eye to player-center is unobstructed by a
+  // solid block. Step the trace at 0.5-block increments (cheap DDA-ish).
+  // A solid hit before the player cancels the shot.
+  _canShootPlayer(player) {
+    const eye = this.pos.clone(); eye.y += this.def.height * 0.8;
+    const target = player.pos.clone(); target.y += 1.0; // chest height
+    const dir = target.clone().sub(eye);
+    const dist = dir.length();
+    if (dist < 0.01) return true;
+    dir.multiplyScalar(1 / dist);
+    const step = 0.5;
+    for (let t = 0; t < dist; t += step) {
+      const p = eye.clone().addScaledVector(dir, t);
+      const b = this.world.getBlock(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
+      const def = blockDefs[b];
+      if (def && def.solid) return false;
+    }
+    return true;
+  }
+
   update(dt, player, isNight) {
     if (this.dead) return;
     dt = Math.min(dt, 0.05);
@@ -137,11 +173,35 @@ export class Mob {
 
     let moveX = 0, moveZ = 0;
     if (d.hostile && (isNight || dist < 6) && dist < 22 && !player.dead) {
-      // chase
+      // chase / kite
       this.yaw = Math.atan2(toPlayer.x, toPlayer.z);
-      moveX = Math.sin(this.yaw); moveZ = Math.cos(this.yaw);
-      if (dist < d.range && this.attackCD <= 0 && Math.abs(toPlayer.y) < 2) {
-        player.damage(d.attack); this.attackCD = 1.0;
+      if (d.ranged) {
+        // Ranged mob: stop moving when at preferred firing range so the
+        // line trace to the player is unobstructed by the mob's own body
+        // and the player can't close in for free. Strafes sideways at
+        // mid-range to dodge retaliation.
+        const r = d.ranged.range;
+        if (dist > r * 0.9) { moveX = Math.sin(this.yaw); moveZ = Math.cos(this.yaw); }
+        else if (dist < r * 0.55) { moveX = -Math.sin(this.yaw); moveZ = -Math.cos(this.yaw); }
+        else {
+          // strafe — perpendicular, alternating
+          const side = (Math.sin(performance.now() * 0.0011) > 0) ? 1 : -1;
+          moveX = Math.cos(this.yaw) * side; moveZ = -Math.sin(this.yaw) * side;
+        }
+        if (dist <= r && this.attackCD <= 0 && Math.abs(toPlayer.y) < 2) {
+          // Cheap "arrow": a line trace from mob-eye to player center.
+          // Damage applied only if nothing solid is in the way (so the
+          // player can hide behind a wall).
+          if (this._canShootPlayer(player)) {
+            player.damage(d.ranged.damage);
+          }
+          this.attackCD = d.ranged.fireCD;
+        }
+      } else {
+        moveX = Math.sin(this.yaw); moveZ = Math.cos(this.yaw);
+        if (dist < d.range && this.attackCD <= 0 && Math.abs(toPlayer.y) < 2) {
+          player.damage(d.attack); this.attackCD = 1.0;
+        }
       }
     } else {
       // wander
@@ -154,6 +214,12 @@ export class Mob {
     this.vel.x = moveX * sp;
     this.vel.z = moveZ * sp;
     this.vel.y -= 28 * dt;
+
+    // Spiders hop erratically. Every 0.6–1.6s while chasing, they kick
+    // upward so the player can't just walk backward to outpace them.
+    if (d.jumpy && this.onGround && (moveX || moveZ) && Math.random() < dt * 1.4) {
+      this.vel.y = 9.5; this.onGround = false;
+    }
 
     // step-up / jump if blocked horizontally and grounded
     const ahead = this.pos.clone(); ahead.x += this.vel.x * dt * 3; ahead.z += this.vel.z * dt * 3;
@@ -227,8 +293,12 @@ export class MobManager {
     // find ground
     let y = 60; while (y > 1 && this.world.getBlock(Math.floor(x), y, Math.floor(z)) === BLOCK.AIR) y--;
     if (y <= 1 || this.world.getBlock(Math.floor(x), y, Math.floor(z)) === BLOCK.WATER) return;
-    const type = isNight ? (Math.random() < 0.7 ? 'zombie' : (Math.random() < 0.5 ? 'pig' : 'cow'))
-                         : (Math.random() < 0.5 ? 'pig' : 'cow');
+    // Night spawn mix: 45% zombie, 30% skeleton, 25% spider.
+    // Day spawns are unchanged — passive mobs only.
+    const r0 = Math.random();
+    const type = isNight
+      ? (r0 < 0.45 ? 'zombie' : r0 < 0.75 ? 'skeleton' : 'spider')
+      : (r0 < 0.5 ? 'pig' : 'cow');
     const mob = new Mob(THREE, this.world, type, x + 0.5, y + 1, z + 0.5);
     this.mobs.push(mob); this.scene.add(mob.group);
   }

@@ -51,47 +51,86 @@ export class Inventory {
 }
 
 // Crafting: grid is an array of length 4 (2x2) or 9 (3x3) of item ids or null.
+// matchRecipe() returns either null or { out, count, consume } where consume
+// is an array of item-id strings — the *exact* ingredients to remove from
+// the grid when the user takes the result. Sum of consume === recipe size.
 export function matchRecipe(grid, size /* 2 or 3 */) {
   for (const r of RECIPES) {
     if (r.type === 'shapeless') {
-      const need = [...r.ingredients];
+      // Shapeless recipes fire if the grid CONTAINS at least the required
+      // ingredients (multiset contains-check). Extras in the grid are
+      // ignored — they're just leftover material. This matters in the 3x3
+      // crafting-grid: dumping 9 planks and expecting 4 sticks works,
+      // because the grid has ≥ 2 planks even though it has 9 items total.
       const have = grid.filter(Boolean);
-      if (have.length !== need.length) continue;
-      const pool = [...have];
+      // Build a multiset of what the grid actually contains.
+      const counts = Object.create(null);
+      for (const id of have) counts[id] = (counts[id] ?? 0) + 1;
+      // Recipe requirement as a multiset.
+      const need = Object.create(null);
+      for (const id of r.ingredients) need[id] = (need[id] ?? 0) + 1;
+      // A shapeless recipe matches when the grid has AT LEAST the recipe's
+      // ingredients. Extras are fine, BUT they must be of an id that the
+      // recipe already uses — otherwise a 3x3 grid full of mixed junk
+      // would match a stick recipe just because it has 2 planks in it.
+      // (Same rule vanilla MC uses for shapeless: extras must "be the same
+      //  as something already in the recipe" — well, vanilla is even
+      // stricter, requiring exact-match, but the relaxed version still
+      // produces sensible behavior in the 3x3 case where the player has
+      // dumped a stack of planks.)
       let ok = true;
-      for (const n of need) {
-        const i = pool.indexOf(n);
-        if (i === -1) { ok = false; break; }
-        pool.splice(i, 1);
+      for (const id in need) {
+        if ((counts[id] ?? 0) < need[id]) { ok = false; break; }
       }
-      if (ok) return { out: r.out, count: r.count };
+      if (ok) {
+        // Verify every "extra" item in the grid is of an id the recipe uses.
+        // Subtract what the recipe needs; any remaining id is an extra; if
+        // that id isn't in the recipe's own id-set, the recipe shouldn't fire.
+        for (const id in counts) {
+          const extra = counts[id] - (need[id] ?? 0);
+          if (extra > 0 && need[id] === undefined) { ok = false; break; }
+        }
+      }
+      if (ok) {
+        // Build the consume list (one entry per ingredient, by id) so
+        // takeCraft() knows exactly which slots to decrement — not "every
+        // non-null slot" (which would over-consume when the grid has extras).
+        const consume = [];
+        for (const id in need) for (let k = 0; k < need[id]; k++) consume.push(id);
+        return { out: r.out, count: r.count, consume };
+      }
     } else {
       // shaped: try all offsets so a 2x2 recipe fits in a 3x3 grid
-      if (tryShaped(r, grid, size)) return { out: r.out, count: r.count };
+      const consume = tryShapedConsume(r, grid, size);
+      if (consume) return { out: r.out, count: r.count, consume };
     }
   }
   return null;
 }
 
-function tryShaped(r, grid, size) {
-  // trim recipe pattern to bounding box
+// shaped recipe: returns the trimmed pattern as the consume list (one item-id
+// string per filled cell), or null if it doesn't fit. We return the pattern
+// directly (not slot indices) so it doesn't depend on grid layout.
+function tryShapedConsume(r, grid, size) {
   const pat = r.pattern; // 3 rows of 3
   let minR = 3, maxR = -1, minC = 3, maxC = -1;
   for (let rr = 0; rr < 3; rr++) for (let cc = 0; cc < 3; cc++) {
     if (pat[rr][cc] !== ' ') { minR = Math.min(minR, rr); maxR = Math.max(maxR, rr); minC = Math.min(minC, cc); maxC = Math.max(maxC, cc); }
   }
-  if (maxR < 0) return false;
+  if (maxR < 0) return null;
   const ph = maxR - minR + 1, pw = maxC - minC + 1;
-  if (ph > size || pw > size) return false;
+  if (ph > size || pw > size) return null;
   for (let oy = 0; oy + ph <= size; oy++) {
     for (let ox = 0; ox + pw <= size; ox++) {
-      if (matchesAt(r, grid, size, ox, oy, minR, minC, ph, pw)) return true;
+      const consume = matchesAt(r, grid, size, ox, oy, minR, minC, ph, pw);
+      if (consume) return consume;
     }
   }
-  return false;
+  return null;
 }
 
 function matchesAt(r, grid, size, ox, oy, minR, minC, ph, pw) {
+  const consume = [];
   for (let gy = 0; gy < size; gy++) {
     for (let gx = 0; gx < size; gx++) {
       const cell = grid[gy * size + gx] || null;
@@ -101,8 +140,9 @@ function matchesAt(r, grid, size, ox, oy, minR, minC, ph, pw) {
         const pc = r.pattern[minR + (gy - oy)][minC + (gx - ox)];
         want = pc === ' ' ? null : r.keymap[pc];
       }
-      if (want !== cell) return false;
+      if (want !== cell) return null;
+      if (want) consume.push(want);
     }
   }
-  return true;
+  return consume;
 }
