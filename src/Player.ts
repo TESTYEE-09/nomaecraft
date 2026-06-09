@@ -66,16 +66,14 @@ export class Player {
   selectedBlockSize: THREE.Vector3 | null = null;
   blockPlacementCoords: THREE.Vector3 | null = null;
 
-  // minicraft toolbar (block IDs for placing)
-  toolbar: (BlockID | null)[] = [
-    BlockID.Grass, BlockID.Dirt, BlockID.Stone, BlockID.StoneBrick,
-    BlockID.RedstoneLamp, BlockID.CoalOre, BlockID.IronOre,
-    BlockID.OakLog, BlockID.Leaves,
-  ];
+  // minicraft toolbar (block IDs for placing) — survival starts empty
+  toolbar: (BlockID | null)[] = [null, null, null, null, null, null, null, null, null];
   activeToolbarIndex = 0;
 
-  // Nomaecraft survival stats
-  pos = new THREE.Vector3(32, 72, 32);
+  // Nomaecraft survival stats — start near the sky so chunk-load + grass-scan
+  // has time to run before we hit the ground. The real spawn y is set in
+  // World.update() once the first grass column is found.
+  pos = new THREE.Vector3(32, 80, 32);
   vel = new THREE.Vector3();
   yaw = 0;
   pitch = 0;
@@ -91,7 +89,7 @@ export class Player {
   air = 10;
   dead = false;
   fallStart: number | null = null;
-  spawn = new THREE.Vector3(32, 72, 32);
+  spawn = new THREE.Vector3(32, 80, 32);
   spawned = false;
 
   inventory = new Inventory(36);
@@ -429,17 +427,7 @@ export class Player {
         break;
       case "Space":
         this.input.jump = true;
-        // double-tap space to toggle flying
-        if (performance.now() - this._lastSpaceTime < 300) {
-          this._spaceCount++;
-          if (this._spaceCount >= 2) {
-            this.flying = !this.flying;
-            this._spaceCount = 0;
-          }
-        } else {
-          this._spaceCount = 1;
-        }
-        this._lastSpaceTime = performance.now();
+        // survival mode: flying disabled
         break;
       case "ShiftLeft":
         this.input.sneak = true;

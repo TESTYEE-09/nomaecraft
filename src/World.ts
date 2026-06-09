@@ -90,23 +90,34 @@ export class World extends THREE.Group {
         if (hud) hud.style.display = "block";
         if (debugMenu) debugMenu.style.display = "none";
 
+        // Find the first solid (non-air) block at the player's x/z column,
+        // scanning from the top of the chunk down. This works for any spawn
+        // height — sky, underground, or right at the surface. If nothing
+        // solid is found (shouldn't happen on a generated world), fall back
+        // to a safe y=70 with zero velocity.
         const startPos = new THREE.Vector3(
           player.position.x,
           player.position.y,
           player.position.z
         );
-        for (let y = this.chunkSize.height; y > 0; y--) {
+        let surfaceY = -1;
+        for (let y = this.chunkSize.height; y >= 0; y--) {
           const block = this.getBlock(startPos.x, y, startPos.z);
-          if (block?.block === BlockID.Grass) {
-            startPos.y = y;
+          if (block && block.block !== BlockID.Air) {
+            surfaceY = y;
             break;
           }
         }
+        const spawnY = surfaceY >= 0 ? surfaceY + 1.8 : 70;
 
-        player.position.set(startPos.x, startPos.y + 1.8, startPos.z);
-        player.spawn.set(startPos.x, startPos.y + 1.8, startPos.z);
+        // Suppress fall damage for the first ground touch after this spawn —
+        // the player drops from the initial sky height on game start, and
+        // we don't want that drop to kill them.
+        player.position.set(startPos.x, spawnY, startPos.z);
+        player.spawn.set(startPos.x, spawnY, startPos.z);
         player.vel.set(0, 0, 0);
         player.fallStart = null;
+        player.spawned = false;
         if (this.onReady) this.onReady(player);
         player.controls.lock();
       }
