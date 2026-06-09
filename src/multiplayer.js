@@ -186,6 +186,13 @@ export class Net {
 
   _hostHandle(from, msg) {
     msg.from = from;
+    // A hit is directed at ONE player — never broadcast it. Apply it if we're
+    // the target, otherwise forward only to that target's connection.
+    if (msg.t === 'hit') {
+      if (msg.target === this.myId) this.h.onHit(msg.dmg, from);
+      else { const c = this.conns.get(msg.target); if (c && c.open) { try { c.send(msg); } catch {} } }
+      return;
+    }
     // apply locally
     if (msg.t === 'state') this.h.onPlayer(from, msg.s);
     else if (msg.t === 'block') this.h.onBlock(msg.x, msg.y, msg.z, msg.b, from);
@@ -248,6 +255,7 @@ export class Net {
 
   _clientHandle(msg) {
     const from = msg.from || this.hostId;
+    if (msg.t === 'hit') { if (!msg.target || msg.target === this.myId) this.h.onHit(msg.dmg, from); return; }
     if (msg.t === 'state') this.h.onPlayer(from, msg.s);
     else if (msg.t === 'block') this.h.onBlock(msg.x, msg.y, msg.z, msg.b, from);
     else if (msg.t === 'chat') this.h.onChat(msg.name, msg.text);
@@ -271,6 +279,21 @@ export class Net {
     const msg = { t: 'chat', name, text, from: this.myId };
     if (this.isHost) { this._broadcast(msg, null); }
     else if (this.host_conn && this.host_conn.open) this.host_conn.send(msg);
+  }
+
+  // Deal damage to one specific player (PvP). The target applies it to their
+  // own health (trust model — fine for a friendly game). Host routes directly
+  // to the target; a client routes through the host.
+  sendHit(target, dmg) {
+    if (!target) return;
+    const msg = { t: 'hit', target, dmg, from: this.myId };
+    if (this.isHost) {
+      if (target === this.myId) { this.h.onHit(dmg, this.myId); return; }
+      const c = this.conns.get(target);
+      if (c && c.open) { try { c.send(msg); } catch {} }
+    } else if (this.host_conn && this.host_conn.open) {
+      this.host_conn.send(msg);
+    }
   }
 
   close() {

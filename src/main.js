@@ -382,25 +382,41 @@ function emptyHeart() { return svgURI(`<svg xmlns='http://www.w3.org/2000/svg' v
 function legSVG(c) { return svgURI(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><ellipse cx='8' cy='9' rx='6' ry='4' fill='${c}' stroke='black'/><rect x='6' y='12' width='4' height='3' fill='white'/></svg>`); }
 function bubbleSVG() { return svgURI(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%237ec8ff' stroke='black'/></svg>`); }
 
+// Cache of the last-rendered HUD values. renderHUD() runs every frame, but the
+// bars only change occasionally — rebuilding 20+ SVG data-URIs and re-parsing
+// innerHTML 60×/sec was pure waste (a real source of GC hitches / stutter).
+// We now rebuild a bar only when its underlying value actually changes.
+let _hudCache = { hp: -1, hunger: -1, airKey: ' ' };
 function renderHUD() {
   // health: 10 hearts = 20 hp
-  let h = '';
-  for (let i = 0; i < 10; i++) {
-    const hp = player.health - i * 2;
-    if (hp >= 2) h += `<div class="icon" style="background-image:url(${heartSVG(1)})"></div>`;
-    else if (hp === 1) h += `<div class="icon" style="background-image:url(${heartSVG(0.5)})"></div>`;
-    else h += `<div class="icon" style="background-image:url(${emptyHeart()})"></div>`;
+  if (player.health !== _hudCache.hp) {
+    _hudCache.hp = player.health;
+    let h = '';
+    for (let i = 0; i < 10; i++) {
+      const hp = player.health - i * 2;
+      if (hp >= 2) h += `<div class="icon" style="background-image:url(${heartSVG(1)})"></div>`;
+      else if (hp === 1) h += `<div class="icon" style="background-image:url(${heartSVG(0.5)})"></div>`;
+      else h += `<div class="icon" style="background-image:url(${emptyHeart()})"></div>`;
+    }
+    healthEl.innerHTML = h;
   }
-  healthEl.innerHTML = h;
-  let g = '';
-  for (let i = 0; i < 10; i++) g += `<div class="icon" style="background-image:url(${legSVG(player.hunger - i * 2 >= 1 ? '%23b5651d' : '%23332')})"></div>`;
-  hungerEl.innerHTML = g;
-  // air only when underwater
-  if (player.headInWater() && player.air < 10) {
-    let a = '';
-    for (let i = 0; i < 10; i++) a += player.air - i >= 1 ? `<div class="icon" style="background-image:url(${bubbleSVG()})"></div>` : '';
-    airEl.innerHTML = a;
-  } else airEl.innerHTML = '';
+  if (player.hunger !== _hudCache.hunger) {
+    _hudCache.hunger = player.hunger;
+    let g = '';
+    for (let i = 0; i < 10; i++) g += `<div class="icon" style="background-image:url(${legSVG(player.hunger - i * 2 >= 1 ? '%23b5651d' : '%23332')})"></div>`;
+    hungerEl.innerHTML = g;
+  }
+  // air only when underwater; keyed on whole-bubble count so it updates ~1×/s
+  const airKey = (player.headInWater() && player.air < 10) ? String(Math.ceil(player.air)) : '';
+  if (airKey !== _hudCache.airKey) {
+    _hudCache.airKey = airKey;
+    if (airKey === '') airEl.innerHTML = '';
+    else {
+      let a = '';
+      for (let i = 0; i < 10; i++) a += player.air - i >= 1 ? `<div class="icon" style="background-image:url(${bubbleSVG()})"></div>` : '';
+      airEl.innerHTML = a;
+    }
+  }
 }
 
 function renderHotbar() {
@@ -564,7 +580,10 @@ function swingAttack() {
   const tool = selectedTool();
   const dmg = tool.attack || 1;
   const m = mobs.attack(camera, player, dmg);
-  if (m) {
+  // If no mob was in range, try to hit another player (PvP).
+  let hit = !!m;
+  if (!m) { const pid = aimRemotePlayer(4, 0.9); if (pid) { net.sendHit(pid, dmg); hit = true; showHitMarker(false); } }
+  if (hit) {
     Audio.playMobHurt();
     if (tool.item && tool.type !== TOOL.HAND) { tool.item.dura = (tool.item.dura ?? ITEMS[tool.item.id].tool.dura) - 1; if (tool.item.dura <= 0) { inventory.removeSelected(1); renderHotbar(); } }
   }
@@ -620,11 +639,17 @@ function fireGun() {
     maxDist = Math.min(maxDist, Math.sqrt(dx * dx + dy * dy + dz * dz));
   }
   const r = mobs.raycastMob(origin, dir, maxDist);
+  // Also test other players along the shot (tight cone), clipped by walls.
+  const pid = aimRemotePlayer(maxDist, 0.985);
   if (r) {
     const killed = mobs.hitMob(r.mob, def.gun.damage, dir, def.gun.kb || 3);
     r.mob.hurtT = 0.2;
     Audio.playMobHurt();
     showHitMarker(killed);
+  } else if (pid) {
+    net.sendHit(pid, def.gun.damage);
+    Audio.playMobHurt();
+    showHitMarker(false);
   }
   updateAmmoHUD();
   renderHotbar();
@@ -1135,7 +1160,27 @@ function netHandlers() {
     onRemovePlayer: (id) => { const rp = remotePlayers.get(id); if (rp) { addChat('system', rp.name + ' left.'); rp.remove(); remotePlayers.delete(id); } },
     onBlock: (x, y, z, b) => { world.setBlock(x, y, z, b, true); if (b === BLOCK.TORCH) torchSet.add(x + ',' + y + ',' + z); else torchSet.delete(x + ',' + y + ',' + z); },
     onChat: (name, text) => addChat(name, text),
+    // Another player hit us (PvP). Apply the damage to our own health; damage()
+    // already drives the red hurt flash + sound + death handling.
+    onHit: (dmg, from) => { if (!player || player.dead) return; player.damage(dmg || 1); },
   };
+}
+
+// Find the remote player the camera is aimed at, within `maxDist` and inside a
+// cone (dot >= minDot). Returns the peer id or null. Used for melee + gunfire.
+function aimRemotePlayer(maxDist, minDot) {
+  if (!multiplayer || !net || remotePlayers.size === 0) return null;
+  const origin = camera.position;
+  const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+  let bestId = null, bestDist = maxDist;
+  for (const [id, rp] of remotePlayers) {
+    const c = rp.group.position.clone(); c.y += 1.1; // aim at the torso
+    const to = c.sub(origin); const dist = to.length();
+    if (dist > maxDist) continue;
+    to.normalize();
+    if (to.dot(dir) >= minDot && dist < bestDist) { bestId = id; bestDist = dist; }
+  }
+  return bestId;
 }
 
 let stateTimer = 0;
@@ -1146,7 +1191,14 @@ function syncMultiplayer(dt) {
     stateTimer = 0;
     net.sendState({ x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw, name: myName, health: player.health });
   }
-  for (const rp of remotePlayers.values()) rp.update(dt);
+  // Drop ghost avatars: peers whose state stopped arriving (crashed tab / lost
+  // connection that never sent a clean 'leave'). Without this they linger
+  // forever, frozen in place.
+  const now = performance.now();
+  for (const [id, rp] of remotePlayers) {
+    if (rp._seen && now - rp._seen > 10000) { rp.remove(); remotePlayers.delete(id); continue; }
+    rp.update(dt);
+  }
 }
 
 // ---------------------------------------------------------------------------

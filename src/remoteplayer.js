@@ -18,7 +18,10 @@ export class RemotePlayer {
     h.position.y = 1.62; this.group.add(h); this.head = h;
     // eyes
     const eyeMat = new THREE.MeshBasicMaterial({ color: 0x111 });
-    for (const sx of [-1, 1]) { const e = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.04), eyeMat); e.position.set(sx * 0.1, 1.66, 0.23); this.group.add(e); }
+    // Eyes go on the FRONT of the head. A player's facing (camera-forward) is
+    // the avatar's local -Z, so the front face is at z = -0.23, not +0.23.
+    // (They were on the back before — "eyes are backwards".)
+    for (const sx of [-1, 1]) { const e = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.04), eyeMat); e.position.set(sx * 0.1, 1.66, -0.23); this.group.add(e); }
     for (const sx of [-1, 1]) {
       const arm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.7, 0.2), skin);
       arm.position.set(sx * 0.33, 1.05, 0); this.group.add(arm);
