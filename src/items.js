@@ -14,6 +14,7 @@ const blockItems = [
   ['bedrock', BLOCK.BEDROCK], ['glass', BLOCK.GLASS], ['crafting_table', BLOCK.CRAFTING_TABLE],
   ['snow', BLOCK.SNOW], ['gravel', BLOCK.GRAVEL], ['brick', BLOCK.BRICK], ['torch', BLOCK.TORCH],
   ['coal_ore', BLOCK.COAL_ORE], ['iron_ore', BLOCK.IRON_ORE], ['gold_ore', BLOCK.GOLD_ORE], ['diamond_ore', BLOCK.DIAMOND_ORE],
+  ['cactus', BLOCK.CACTUS], ['ice', BLOCK.ICE],
 ];
 for (const [id, b] of blockItems) reg(id, { name: prettify(id), block: b });
 

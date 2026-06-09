@@ -23,6 +23,8 @@ export const BLOCK = {
   GRAVEL: 18,
   BRICK: 19,
   TORCH: 20,
+  CACTUS: 21,
+  ICE: 22,
 };
 
 // Material category drives which tool mines fastest and base hardness.
@@ -50,6 +52,8 @@ export const blockDefs = {
   [BLOCK.GRAVEL]:       { name: 'Gravel', solid: true, tool: TOOL.SHOVEL, hardness: 0.6 },
   [BLOCK.BRICK]:        { name: 'Bricks', solid: true, tool: TOOL.PICKAXE, hardness: 2.0, needs: 1 },
   [BLOCK.TORCH]:        { name: 'Torch', solid: false, tool: TOOL.HAND, hardness: 0.1, transparent: true, light: 14, billboard: true },
+  [BLOCK.CACTUS]:       { name: 'Cactus', solid: true, tool: TOOL.HAND, hardness: 0.4 },
+  [BLOCK.ICE]:          { name: 'Ice', solid: true, tool: TOOL.PICKAXE, hardness: 0.5, transparent: true },
 };
 
 // ---- Procedural texture atlas -------------------------------------------------
@@ -197,6 +201,23 @@ export function buildAtlas(THREE) {
     c.fillStyle = '#ffcc33'; c.fillRect(ox + 6, oy + 2, 4, 5);
     c.fillStyle = '#ffffaa'; c.fillRect(ox + 7, oy + 3, 2, 2);
   });
+  tileMap.cactus_side = newTile((c, ox, oy) => {
+    noiseFill(c, ox, oy, '#2d6e1a', 0.06, 71);
+    for (let x = 0; x < TILE; x += 4) for (let y = 0; y < TILE; y++) px(c, ox + x, oy + y, shade('#3a8a2a', 0.05));
+    blobs(c, ox, oy, '#8ab040', 6, 73);
+  });
+  tileMap.cactus_top = newTile((c, ox, oy) => {
+    noiseFill(c, ox, oy, '#3a8a2a', 0.06, 75);
+    for (let i = 5; i < 11; i++) { px(c, ox + 8, oy + i, '#4a9a3a'); px(c, ox + i, oy + 8, '#4a9a3a'); }
+  });
+  tileMap.ice = newTile((c, ox, oy) => {
+    c.clearRect(ox, oy, TILE, TILE);
+    c.fillStyle = 'rgba(160,216,239,0.6)'; c.fillRect(ox, oy, TILE, TILE);
+    c.strokeStyle = 'rgba(220,240,255,0.5)'; c.lineWidth = 1;
+    c.beginPath(); c.moveTo(ox + 2, oy + 4); c.lineTo(ox + 10, oy + 8); c.lineTo(ox + 14, oy + 5); c.stroke();
+    c.beginPath(); c.moveTo(ox + 5, oy + 12); c.lineTo(ox + 12, oy + 14); c.stroke();
+    c.strokeStyle = 'rgba(200,230,245,0.4)'; c.strokeRect(ox + 0.5, oy + 0.5, TILE - 1, TILE - 1);
+  });
 
   // crack stages (row 4, columns 0..3 — stage 0..3 to keep within 4 tiles;
   // stage 4 reuses stage 3 with the per-face UV animation done in main.js
@@ -248,6 +269,8 @@ export function buildAtlas(THREE) {
     [BLOCK.GRAVEL]:      { all: tileMap.gravel },
     [BLOCK.BRICK]:       { all: tileMap.brick },
     [BLOCK.TORCH]:       { all: tileMap.torch },
+    [BLOCK.CACTUS]:      { top: tileMap.cactus_top, side: tileMap.cactus_side, bottom: tileMap.cactus_top },
+    [BLOCK.ICE]:         { all: tileMap.ice },
   };
 
   // pre-computed UVs for the 4 crack stages (for the per-face overlay mesh)

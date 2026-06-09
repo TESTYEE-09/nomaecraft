@@ -15,6 +15,8 @@ export class World {
     this.seed = seed;
     this.noise = makeNoise(seed);
     this.treeNoise = makeNoise(seed + 99);
+    this.tempNoise = makeNoise(seed + 200);
+    this.moistNoise = makeNoise(seed + 300);
     this.chunks = new Map();     // key -> { data:Uint8Array, cx, cz, mesh, tmesh, dirty }
     this.edits = new Map();      // "x,y,z" -> blockId   (player/multiplayer modifications)
     this.group = new THREE.Group();
@@ -36,10 +38,25 @@ export class World {
     return Math.max(2, Math.min(HEIGHT - 6, Math.floor(h)));
   }
 
-  biomeTop(h, x, z) {
-    if (h <= SEA + 1) return BLOCK.SAND;
-    if (h > SEA + 26) return BLOCK.SNOW;
-    return BLOCK.GRASS;
+  getBiome(x, z) {
+    const temp = this.tempNoise.fbm(x * 0.003, z * 0.003, 3);
+    const moist = this.moistNoise.fbm(x * 0.004, z * 0.004, 3);
+    if (temp > 0.25) return moist < -0.1 ? 'desert' : 'swamp';
+    if (temp < -0.2) return moist < -0.1 ? 'tundra' : 'taiga';
+    return moist > 0.1 ? 'forest' : 'plains';
+  }
+
+  biomeTop(h, biome) {
+    switch (biome) {
+      case 'desert': return BLOCK.SAND;
+      case 'tundra': return h <= SEA + 1 ? BLOCK.GRAVEL : BLOCK.SNOW;
+      case 'taiga': return h <= SEA + 1 ? BLOCK.GRAVEL : (h > SEA + 20 ? BLOCK.SNOW : BLOCK.GRASS);
+      case 'swamp': return h <= SEA + 1 ? BLOCK.SAND : BLOCK.GRASS;
+      default:
+        if (h <= SEA + 1) return BLOCK.SAND;
+        if (h > SEA + 26) return BLOCK.SNOW;
+        return BLOCK.GRASS;
+    }
   }
 
   generateChunk(cx, cz) {
@@ -48,30 +65,42 @@ export class World {
     for (let lx = 0; lx < CHUNK; lx++) {
       for (let lz = 0; lz < CHUNK; lz++) {
         const wx = cx * CHUNK + lx, wz = cz * CHUNK + lz;
+        const biome = this.getBiome(wx, wz);
         const h = this.genHeight(wx, wz);
-        const top = this.biomeTop(h, wx, wz);
+        const top = this.biomeTop(h, biome);
         for (let y = 0; y <= Math.max(h, SEA); y++) {
           let b = BLOCK.AIR;
           if (y === 0) b = BLOCK.BEDROCK;
           else if (y < h - 4) {
             b = BLOCK.STONE;
-            // ore distribution by depth
             const ore = n.noise2(wx * 0.1 + y * 0.3, wz * 0.1 - y * 0.2);
             if (y < 14 && ore > 0.85) b = BLOCK.DIAMOND_ORE;
             else if (y < 22 && ore > 0.82) b = BLOCK.GOLD_ORE;
             else if (ore > 0.78) b = BLOCK.IRON_ORE;
             else if (ore < -0.8) b = BLOCK.COAL_ORE;
             else if (ore < -0.86) b = BLOCK.GRAVEL;
-          } else if (y < h) b = (top === BLOCK.SAND) ? BLOCK.SAND : BLOCK.DIRT;
-          else if (y === h) b = top;
-          else if (y <= SEA) b = BLOCK.WATER;
+          } else if (y < h) {
+            b = (biome === 'desert' || top === BLOCK.SAND) ? BLOCK.SAND : BLOCK.DIRT;
+          } else if (y === h) b = top;
+          else if (y <= SEA) {
+            if (y === SEA && (biome === 'tundra' || biome === 'taiga')) b = BLOCK.ICE;
+            else b = BLOCK.WATER;
+          }
           data[idx(lx, y, lz)] = b;
         }
-        // trees on grass above sea — clumped into forest regions so they look natural
-        if (top === BLOCK.GRASS && h > SEA + 1 && lx > 1 && lx < CHUNK - 2 && lz > 1 && lz < CHUNK - 2) {
-          const forest = this.treeNoise.fbm(wx * 0.012, wz * 0.012, 2); // -1..1, large regions
-          const thresh = forest > 0.15 ? 0.86 : (forest > -0.1 ? 0.94 : 0.985);
-          if (this.hash(wx, wz) > thresh) this.placeTree(data, lx, h + 1, lz);
+        // vegetation per biome
+        if (lx > 1 && lx < CHUNK - 2 && lz > 1 && lz < CHUNK - 2 && h > SEA + 1) {
+          if (biome === 'desert') {
+            if (top === BLOCK.SAND && this.hash(wx, wz) > 0.97) this.placeCactus(data, lx, h + 1, lz, wx, wz);
+          } else if (top === BLOCK.GRASS || top === BLOCK.SNOW) {
+            const forest = this.treeNoise.fbm(wx * 0.012, wz * 0.012, 2);
+            let thresh;
+            if (biome === 'forest' || biome === 'taiga') thresh = forest > 0 ? 0.78 : 0.88;
+            else if (biome === 'tundra') thresh = 0.97;
+            else if (biome === 'swamp') thresh = forest > 0.1 ? 0.85 : 0.93;
+            else thresh = forest > 0.15 ? 0.86 : (forest > -0.1 ? 0.94 : 0.985);
+            if (this.hash(wx, wz) > thresh) this.placeTree(data, lx, h + 1, lz);
+          }
         }
       }
     }
@@ -100,6 +129,11 @@ export class World {
         if (data[idx(xx, yy, zz)] === BLOCK.AIR) data[idx(xx, yy, zz)] = BLOCK.LEAVES;
       }
     }
+  }
+
+  placeCactus(data, x, y, z, wx, wz) {
+    const height = 1 + ((this.hash(wx + 100, wz + 100) * 3) | 0);
+    for (let i = 0; i < height; i++) if (y + i < HEIGHT) data[idx(x, y + i, z)] = BLOCK.CACTUS;
   }
 
   getChunk(cx, cz, create = true) {

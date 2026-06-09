@@ -289,7 +289,7 @@ let currentTarget = null; // {hit, place, block} from per-frame raycast
 const input = { forward: 0, back: 0, left: 0, right: 0, jump: 0, sneak: 0, sprint: 0, mouseDX: 0, mouseDY: 0 };
 let mining = false, placing = false, locked = false, paused = true, invOpen = false;
 let breakTarget = null, breakProgress = 0;
-let eatCD = 0, placeCD = 0, attackAnim = 0, sprintTapT = 0;
+let eatCD = 0, placeCD = 0, attackAnim = 0, sprintTapT = 0, cactusDmgCD = 0;
 let stepCD = 0;  // footstep throttle (seconds)
 let gunCD = 0, reloading = false, reloadT = 0;  // FPS gun state
 let hitMarkerT = 0;  // hit-marker flash timer
@@ -1019,6 +1019,12 @@ document.addEventListener('mouseup', (e) => {
     distribSlots = [];
     renderInventoryUI();
     renderHotbar();
+  } else if (distributing && distribSlots.length > 0 && held) {
+    dropHeldInto(distribSlots[0].kind, distribSlots[0].i);
+    distributing = false;
+    distribSlots = [];
+    renderInventoryUI();
+    renderHotbar();
   } else {
     distributing = false;
     distribSlots = [];
@@ -1419,6 +1425,16 @@ function loop(now) {
 
   if (!invOpen) {
     player.update(dt, input);
+    cactusDmgCD = Math.max(0, cactusDmgCD - dt);
+    if (cactusDmgCD <= 0 && !player.flying) {
+      const pp = player.pos;
+      for (let dx = -1; dx <= 1; dx++) for (let dy = 0; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        const bx = Math.floor(pp.x) + dx, by = Math.floor(pp.y) + dy, bz = Math.floor(pp.z) + dz;
+        if (world.getBlock(bx, by, bz) === BLOCK.CACTUS && pp.x + 0.3 > bx && pp.x - 0.3 < bx + 1 && pp.y + 1.8 > by && pp.y < by + 1 && pp.z + 0.3 > bz && pp.z - 0.3 < bz + 1) {
+          player.damage(1); cactusDmgCD = 0.5; dx = dz = dy = 2;
+        }
+      }
+    }
     eatCD = Math.max(0, eatCD - dt); placeCD = Math.max(0, placeCD - dt); attackAnim = Math.max(0, attackAnim - dt);
     // gun timers + auto-fire while the trigger is held
     gunCD = Math.max(0, gunCD - dt);
