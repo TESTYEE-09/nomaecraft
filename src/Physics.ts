@@ -169,13 +169,21 @@ export class Physics {
       const deltaPosition = collision.normal.clone();
       deltaPosition.multiplyScalar(collision.overlap);
 
-      if (!player.onGround && deltaPosition.y !== 0) {
-        deltaPosition.y = 0;
-      }
+      // Always apply the y component of the resolution — zeroing it
+      // silently lets the player fall through floors. The previous
+      // implementation nuked y when the player wasn't already on the
+      // ground, which was the cause of the "fall through floor" bug.
       player.position.add(deltaPosition);
 
-      if (collision.normal.y < 0) {
-        player.vel.y += 10;
+      // If we got pushed UP by a floor, zero out downward velocity so we
+      // don't keep accelerating into the block we just landed on. We only
+      // kill velocity on the y axis when the push direction is positive
+      // (i.e. moving us out of a floor).
+      if (collision.normal.y > 0 && player.vel.y < 0) {
+        player.vel.y = 0;
+      } else if (collision.normal.y < 0 && player.vel.y > 0) {
+        // Pushed down by a ceiling — kill upward velocity.
+        player.vel.y = 0;
       }
 
       const magnitude = player.worldVelocity.dot(collision.normal);

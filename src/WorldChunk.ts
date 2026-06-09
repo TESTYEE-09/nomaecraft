@@ -473,9 +473,15 @@ export class WorldChunk extends THREE.Group {
   }
 
   disposeChildren() {
+    // Note: the chunk's InstancedMeshes share a module-level BoxGeometry /
+    // PlaneGeometry (see top of file). Disposing those geometries would
+    // destroy them for every other chunk in the world. We dispose the
+    // per-instance resources (the InstancedMesh's own instanceMatrix
+    // buffer) but leave the shared geometries alone — they're tiny and
+    // there are only two of them for the lifetime of the app.
     this.traverse((child) => {
-      if (child instanceof THREE.Mesh) {
-        child.geometry.dispose();
+      if (child instanceof THREE.InstancedMesh) {
+        child.dispose();
       }
     });
     this.clear();

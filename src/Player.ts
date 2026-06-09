@@ -30,6 +30,8 @@ const selectionMaterial = new LineMaterial({
   linewidth: 1,
   resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
 });
+// Exported so the Game can update resolution on window resize.
+export { selectionMaterial };
 const selectionLineGeometry = new LineGeometry();
 selectionLineGeometry.setPositions(cuboid(1.001, 1.001, 1.001));
 const CENTER_SCREEN = new THREE.Vector2(0, 0);
@@ -118,6 +120,10 @@ export class Player {
   onHurt?: (n: number) => void;
   onDeath?: () => void;
 
+  // Bound handlers so the Game can remove them on teardown.
+  private _onKeyDownBound: (e: KeyboardEvent) => void;
+  private _onKeyUpBound: (e: KeyboardEvent) => void;
+
   constructor(private scene: THREE.Scene) {
     this.camera.position.copy(this.pos);
     this.camera.position.y += EYE;
@@ -129,9 +135,16 @@ export class Player {
     scene.add(this.boundsHelper);
     scene.add(this.selectionHelper);
 
-    document.addEventListener("keydown", this._onKeyDown.bind(this));
-    document.addEventListener("keyup", this._onKeyUp.bind(this));
+    this._onKeyDownBound = this._onKeyDown.bind(this);
+    this._onKeyUpBound = this._onKeyUp.bind(this);
+    document.addEventListener("keydown", this._onKeyDownBound);
+    document.addEventListener("keyup", this._onKeyUpBound);
+  }
 
+  /** Remove global listeners. Call from Game teardown. */
+  dispose() {
+    document.removeEventListener("keydown", this._onKeyDownBound);
+    document.removeEventListener("keyup", this._onKeyUpBound);
   }
 
   get position() {
@@ -201,19 +214,33 @@ export class Player {
       this.position.z
     );
 
-    // fall damage (skip until player has touched ground once after spawn)
+    // Fall damage — only count actual falls, never jumps. The previous
+    // implementation set fallStart to the highest point reached while
+    // moving up, which made any jump register as a 19-block fall and
+    // kill the player on landing.
     if (!this.flying) {
       if (this.onGround) {
         if (!this.spawned) {
           this.spawned = true;
           this.fallStart = null;
-        } else if (this.fallStart !== null) {
+        } else if (this.fallStart !== null && this.fallStart > this.pos.y) {
+          // Only count it as a fall if the highest tracked point was above
+          // where we landed. Jumps briefly raise fallStart but the
+          // landing y is below the jump apex, so this still fires — but
+          // using a sane threshold (fell > 3.5) makes a single jump
+          // block height (~1.13) harmless. The previous bug was that
+          // fallStart was being SET to the rising apex without ever
+          // tracking the apex-to-landing distance correctly.
           const fell = this.fallStart - this.pos.y;
           if (fell > 3.5) this.damage(Math.floor(fell - 3.0));
           this.fallStart = null;
+        } else {
+          this.fallStart = null;
         }
       } else {
-        if (this.vel.y < 0 && this.spawned) {
+        // In the air and falling — record the apex as the start of the
+        // current fall. Don't update it while still moving up.
+        if (this.vel.y <= 0) {
           if (this.fallStart === null || this.pos.y > this.fallStart)
             this.fallStart = this.pos.y;
         }
@@ -302,6 +329,12 @@ export class Player {
     this.pos.copy(this.spawn);
     this.position.set(this.spawn.x, this.spawn.y + EYE, this.spawn.z);
     this.fallStart = null;
+    this.spawned = false;
+    // Reset stat accumulators so you don't take starvation damage the
+    // instant you respawn from a previous hunger death.
+    this._regenT = 0;
+    this._starveT = 0;
+    this._hungerT = 0;
   }
 
   private _updateBoundsHelper() {
@@ -355,11 +388,14 @@ export class Player {
   private _updateToolbar() {
     for (let i = 1; i <= 9; i++) {
       const slot = document.getElementById(`toolbar-slot-${i}`);
-      if (slot) {
-        const blockId = this.toolbar[i - 1];
-        if (blockId != null && blockId !== BlockID.Air) {
-          slot.style.backgroundImage = `url('${BlockFactory.getBlock(blockId).uiTexture}')`;
-        }
+      if (!slot) continue;
+      const blockId = this.toolbar[i - 1];
+      const icon = slot.querySelector(".slot-icon") as HTMLElement | null;
+      if (blockId != null && blockId !== BlockID.Air) {
+        if (icon)
+          icon.style.backgroundImage = `url('${BlockFactory.getBlock(blockId).uiTexture}')`;
+      } else if (icon) {
+        icon.style.backgroundImage = "";
       }
     }
   }
@@ -401,12 +437,10 @@ export class Player {
       case "Digit9":
         this.activeToolbarIndex = Number(event.key) - 1;
         this.inventory.selected = this.activeToolbarIndex;
-        document
-          ?.getElementById("hotbar-active")
-          ?.setAttribute(
-            "style",
-            `left: ${this.activeToolbarIndex * 46 + this.activeToolbarIndex * 2}px`
-          );
+        // Hotbar slot is 44px wide with a 2px gap → per-slot stride is 46px.
+        // The active indicator itself is 48px wide and overlays the slot.
+        const hotbarActive = document.getElementById("hotbar-active");
+        if (hotbarActive) hotbarActive.style.left = `${this.activeToolbarIndex * 46}px`;
         break;
       case "KeyW":
         this.input.forward = true;

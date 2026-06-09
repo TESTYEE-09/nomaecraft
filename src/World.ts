@@ -91,24 +91,35 @@ export class World extends THREE.Group {
         if (debugMenu) debugMenu.style.display = "none";
 
         // Find the first solid (non-air) block at the player's x/z column,
-        // scanning from the top of the chunk down. This works for any spawn
-        // height — sky, underground, or right at the surface. If nothing
-        // solid is found (shouldn't happen on a generated world), fall back
-        // to a safe y=70 with zero velocity.
+        // scanning from the top of the chunk down. If nothing solid is
+        // found (shouldn't happen on a generated world), fall back to a
+        // safe y just under the chunk top. Crucially, the spawn y must be
+        // STRICTLY LESS than chunkSize.height so the player doesn't get
+        // placed above the loaded chunk and fall forever.
         const startPos = new THREE.Vector3(
           player.position.x,
           player.position.y,
           player.position.z
         );
         let surfaceY = -1;
-        for (let y = this.chunkSize.height; y >= 0; y--) {
+        for (let y = this.chunkSize.height - 1; y >= 0; y--) {
           const block = this.getBlock(startPos.x, y, startPos.z);
           if (block && block.block !== BlockID.Air) {
             surfaceY = y;
             break;
           }
         }
-        const spawnY = surfaceY >= 0 ? surfaceY + 1.8 : 70;
+        // Surface found → stand 1.8 blocks above it (one block + eye height
+        // of foot clearance). No surface found → drop just under the chunk
+        // top so the player has a fighting chance of landing on whatever
+        // loads around them.
+        const maxSafeY = this.chunkSize.height - 2;
+        let spawnY =
+          surfaceY >= 0
+            ? surfaceY + 1.8
+            : Math.max(1, this.chunkSize.height - 2);
+        if (spawnY > maxSafeY) spawnY = maxSafeY;
+        if (spawnY < 1) spawnY = 1;
 
         // Suppress fall damage for the first ground touch after this spawn —
         // the player drops from the initial sky height on game start, and

@@ -6,7 +6,7 @@ import Stats from "three/examples/jsm/libs/stats.module";
 
 import audioManager from "./audio/AudioManager";
 import { Physics } from "./Physics";
-import { Player } from "./Player";
+import { Player, selectionMaterial } from "./Player";
 import { numberWithCommas } from "./util";
 import { World } from "./World";
 import { BlockID } from "./Block";
@@ -160,19 +160,8 @@ export default class Game {
       audioManager.play("gui.button.press");
       this.saveAndQuit();
     });
-
-    // Escape key for pause
-    document.addEventListener("keydown", (e) => {
-      if (e.code === "Escape" && this.running && !this.player?.dead) {
-        const inv = document.getElementById("inventory-panel");
-        const chat = document.getElementById("chat-input");
-        if (inv && inv.style.display !== "none") return;
-        if (chat && chat === document.activeElement) return;
-
-        if (this.paused) this.unpause();
-        else this.pause();
-      }
-    });
+    // Escape-key pause handling is now in initListeners (as _escapeKeyBound)
+    // so it can be removed cleanly on saveAndQuit.
   }
 
   private showWorldSelect() {
@@ -318,17 +307,35 @@ export default class Game {
     this.running = false;
     this.paused = false;
 
-    // Clean up
+    // Clean up network
     if (this.net) { this.net.close(); this.net = null; }
     for (const [, rp] of this.remotePlayers) rp.remove();
     this.remotePlayers.clear();
 
-    // Remove renderer
-    if (this.renderer?.domElement?.parentNode) {
-      this.renderer.domElement.parentNode.removeChild(this.renderer.domElement);
+    // Remove global listeners that would otherwise stack across sessions.
+    document.removeEventListener("mousedown", this._onMouseDownBound);
+    document.removeEventListener("keydown", this._escapeKeyBound);
+    document.removeEventListener("keydown", this._chatKeyDownBound!);
+    const chatInput = document.getElementById("chat-input") as HTMLInputElement | null;
+    if (chatInput && this._chatInputKeyBound)
+      chatInput.removeEventListener("keydown", this._chatInputKeyBound);
+    window.removeEventListener("resize", this._onWindowResizeBound);
+    if (this.player) this.player.dispose();
+
+    // Remove the renderer from the DOM and free its WebGL context so a
+    // fresh start doesn't bleed GPU resources.
+    if (this.renderer) {
+      if (this.renderer.domElement?.parentNode) {
+        this.renderer.domElement.parentNode.removeChild(this.renderer.domElement);
+      }
+      this.renderer.dispose();
+      this.renderer.forceContextLoss();
     }
-    if (this.stats?.dom?.parentNode) {
-      this.stats.dom.parentNode.removeChild(this.stats.dom);
+    if (this.stats) {
+      if (this.stats.dom?.parentNode) {
+        this.stats.dom.parentNode.removeChild(this.stats.dom);
+      }
+      this.stats = null;
     }
 
     // Hide game UI
@@ -401,10 +408,17 @@ export default class Game {
     box.style.display = "block";
     const div = document.createElement("div");
     div.className = name === "system" ? "chat-msg chat-system" : "chat-msg";
+    // textContent (not innerHTML) so player-supplied names can't inject markup.
     div.textContent = name === "system" ? text : `<${name}> ${text}`;
     log.appendChild(div);
     log.scrollTop = log.scrollHeight;
     setTimeout(() => div.classList.add("fade"), 100);
+
+    // Cap the chat log so it doesn't grow unbounded across long sessions.
+    const MAX_CHAT = 50;
+    while (log.childElementCount > MAX_CHAT) {
+      log.removeChild(log.firstElementChild!);
+    }
   }
 
   // ---- Scene Init ----
@@ -519,7 +533,8 @@ export default class Game {
     const chatInput = document.getElementById("chat-input") as HTMLInputElement;
     if (!chatInput) return;
 
-    document.addEventListener("keydown", (e) => {
+    // Bound so we can remove on teardown.
+    const onKeyDown = (e: KeyboardEvent) => {
       if (e.code === "KeyT" && this.player?.controls.isLocked && this.multiplayer) {
         e.preventDefault();
         this.player.controls.unlock();
@@ -531,9 +546,8 @@ export default class Game {
         chatInput.value = "";
         this.player.controls.lock();
       }
-    });
-
-    chatInput.addEventListener("keydown", (e) => {
+    };
+    const onInputKey = (e: KeyboardEvent) => {
       if (e.code === "Enter") {
         const text = chatInput.value.trim();
         if (text && this.net) {
@@ -545,8 +559,16 @@ export default class Game {
         this.player.controls.lock();
       }
       e.stopPropagation();
-    });
+    };
+    this._chatKeyDownBound = onKeyDown;
+    this._chatInputKeyBound = onInputKey;
+
+    document.addEventListener("keydown", onKeyDown);
+    chatInput.addEventListener("keydown", onInputKey);
   }
+
+  private _chatKeyDownBound?: (e: KeyboardEvent) => void;
+  private _chatInputKeyBound?: (e: KeyboardEvent) => void;
 
   initAudio() {
     const sound = new Howl({ src: ["audio/ambient.mp3"], loop: true });
@@ -594,9 +616,25 @@ export default class Game {
     }
   }
 
+  // Bound so saveAndQuit can remove them.
+  private _onMouseDownBound = (e: MouseEvent) => this.onMouseDown(e);
+  private _onWindowResizeBound = () => this.onWindowResize();
+  private _escapeKeyBound = (e: KeyboardEvent) => {
+    if (e.code === "Escape" && this.running && !this.player?.dead) {
+      const inv = document.getElementById("inventory-panel");
+      const chat = document.getElementById("chat-input");
+      if (inv && inv.style.display !== "none") return;
+      if (chat && chat === document.activeElement) return;
+
+      if (this.paused) this.unpause();
+      else this.pause();
+    }
+  };
+
   initListeners() {
-    window.addEventListener("resize", this.onWindowResize.bind(this), false);
-    document.addEventListener("mousedown", this.onMouseDown.bind(this), false);
+    window.addEventListener("resize", this._onWindowResizeBound, false);
+    document.addEventListener("mousedown", this._onMouseDownBound, false);
+    document.addEventListener("keydown", this._escapeKeyBound);
   }
 
   onWindowResize() {
@@ -605,6 +643,10 @@ export default class Game {
     this.player.camera.aspect = window.innerWidth / window.innerHeight;
     this.player.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    // The block selection outline uses a screen-space line material whose
+    // thickness depends on the renderer's pixel resolution. If we don't
+    // update it on resize, the outline goes paper-thin or pixel-thick.
+    selectionMaterial.resolution.set(window.innerWidth, window.innerHeight);
   }
 
   updateSkyColor() {
