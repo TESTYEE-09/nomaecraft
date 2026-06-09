@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "nomaecraft",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8123"],
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
       "port": 8123
     }
   ]
