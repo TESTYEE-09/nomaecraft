@@ -1,4 +1,5 @@
 import { BlockID } from "./Block";
+import { BlockFactory } from "./Block/BlockFactory";
 
 export const TOOL_TYPE = {
   NONE: 0,
@@ -359,3 +360,51 @@ for (const tname of ["wood", "stone", "iron", "gold", "diamond"]) {
     S: "stick",
   });
 }
+
+export function getItemIcon(itemId: string): string {
+  const item = ITEMS[itemId];
+  if (!item) return "";
+
+  if (item.block !== undefined) {
+    return BlockFactory.getBlock(item.block).uiTexture;
+  }
+
+  if (item.draw) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 32;
+    canvas.height = 32;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      item.draw(ctx);
+      return canvas.toDataURL();
+    }
+  }
+
+  return "";
+}
+
+export function getBlockDrop(blockId: BlockID): { id: string; count: number } | null {
+  switch (blockId) {
+    case BlockID.Grass:
+      return { id: "dirt", count: 1 };
+    case BlockID.Dirt:
+      return { id: "dirt", count: 1 };
+    case BlockID.Stone:
+      return { id: "cobblestone", count: 1 };
+    case BlockID.StoneBrick:
+      return { id: "cobblestone", count: 1 };
+    case BlockID.OakLog:
+      return { id: "oak_log", count: 1 };
+    case BlockID.Leaves:
+      return Math.random() < 0.1 ? { id: "apple", count: 1 } : { id: "leaves", count: 1 };
+    case BlockID.CoalOre:
+      return { id: "coal", count: 1 };
+    case BlockID.IronOre:
+      return { id: "iron_ore", count: 1 };
+    case BlockID.RedstoneLamp:
+      return { id: "redstone_lamp", count: 1 };
+    default:
+      return null;
+  }
+}
+

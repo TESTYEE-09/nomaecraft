@@ -10,7 +10,8 @@ import { BlockID } from "./Block";
 import { BlockFactory } from "./Block/BlockFactory";
 import { World } from "./World";
 import { Inventory, Slot } from "./Inventory";
-import { ITEMS, TOOL_TYPE } from "./Items";
+import { ITEMS, TOOL_TYPE, getItemIcon } from "./Items";
+import { Physics } from "./Physics";
 
 function cuboid(width: number, height: number, depth: number) {
   const hw = width * 0.5;
@@ -152,7 +153,14 @@ export class Player {
   }
 
   get activeBlockId() {
-    return this.toolbar[this.activeToolbarIndex];
+    const slot = this.inventory.slots[this.activeToolbarIndex];
+    if (slot) {
+      const itemDef = ITEMS[slot.id];
+      if (itemDef && itemDef.block !== undefined) {
+        return itemDef.block;
+      }
+    }
+    return null;
   }
 
   get worldVelocity() {
@@ -166,9 +174,16 @@ export class Player {
     this.vel.add(dv);
   }
 
-  update(dt: number, world: World) {
+  update(dt: number, world: World, physics: Physics) {
     if (this.dead) return;
     dt = Math.min(dt, 0.05);
+
+    // Sync pos from camera in case it was modified externally (e.g., loaded/spawned)
+    this.pos.set(
+      this.position.x,
+      this.position.y - EYE,
+      this.position.z
+    );
 
     this.sprinting = this.input.sprint && this.input.forward && this.hunger > 0;
     const baseSpeed = this.flying ? FLY_SPEED : this.sprinting ? SPRINT : SPEED;
@@ -200,12 +215,17 @@ export class Player {
       }
     }
 
-    // move with collision via Physics system (handled externally)
-    // The physics system sets pos/vel/onGround
-    // We just apply velocity to controls for the camera
+    // Measure displacement using temporary move
+    const oldCameraPos = this.camera.position.clone();
     this.controls.moveRight(this.vel.x * dt);
     this.controls.moveForward(-this.vel.z * dt);
-    this.position.y += this.vel.y * dt;
+    this.camera.position.y += this.vel.y * dt;
+
+    const displacement = this.camera.position.clone().sub(oldCameraPos);
+    this.camera.position.copy(oldCameraPos); // Revert
+
+    // Move via physics axis-by-axis resolution
+    physics.move(this, displacement, world);
 
     // sync pos from camera
     this.pos.set(
@@ -389,13 +409,25 @@ export class Player {
     for (let i = 1; i <= 9; i++) {
       const slot = document.getElementById(`toolbar-slot-${i}`);
       if (!slot) continue;
-      const blockId = this.toolbar[i - 1];
+      const invSlot = this.inventory.slots[i - 1];
       const icon = slot.querySelector(".slot-icon") as HTMLElement | null;
-      if (blockId != null && blockId !== BlockID.Air) {
-        if (icon)
-          icon.style.backgroundImage = `url('${BlockFactory.getBlock(blockId).uiTexture}')`;
-      } else if (icon) {
-        icon.style.backgroundImage = "";
+      const countEl = slot.querySelector(".slot-count") as HTMLElement | null;
+
+      if (invSlot) {
+        if (icon) {
+          icon.style.backgroundImage = `url('${getItemIcon(invSlot.id)}')`;
+        }
+        if (countEl) {
+          countEl.textContent = invSlot.count > 1 ? String(invSlot.count) : "";
+        } else if (invSlot.count > 1) {
+          const newCount = document.createElement("div");
+          newCount.className = "slot-count";
+          newCount.textContent = String(invSlot.count);
+          slot.appendChild(newCount);
+        }
+      } else {
+        if (icon) icon.style.backgroundImage = "";
+        if (countEl) countEl.textContent = "";
       }
     }
   }

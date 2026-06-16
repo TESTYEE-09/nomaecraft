@@ -10,6 +10,8 @@ import { Player, selectionMaterial } from "./Player";
 import { numberWithCommas } from "./util";
 import { World } from "./World";
 import { BlockID } from "./Block";
+import { getBlockDrop, ITEMS } from "./Items";
+import { InventoryUI } from "./InventoryUI";
 import { Net, NetHandlers } from "./multiplayer/Net";
 import { RemotePlayer } from "./multiplayer/RemotePlayer";
 import {
@@ -62,6 +64,7 @@ export default class Game {
   world!: World;
   player!: Player;
   private physics!: Physics;
+  private inventoryUI!: InventoryUI;
 
   private previousTime = 0;
   private lastShadowUpdate = 0;
@@ -259,6 +262,7 @@ export default class Game {
         player.vel.set(0, 0, 0);
         player.fallStart = null;
       }
+      this.inventoryUI.render();
     };
   }
 
@@ -494,6 +498,9 @@ export default class Game {
 
     this.player = new Player(this.scene);
     this.physics = new Physics(this.scene);
+    this.inventoryUI = new InventoryUI(this.player, () => {
+      this.updateHUD();
+    });
 
     this.player.onDeath = () => {
       const ds = document.getElementById("death-screen");
@@ -582,15 +589,42 @@ export default class Game {
         const x = Math.ceil(this.player.selectedCoords.x - 0.5);
         const y = Math.ceil(this.player.selectedCoords.y - 0.5);
         const z = Math.ceil(this.player.selectedCoords.z - 0.5);
-        if (this.multiplayer && this.net) {
-          this.world.removeBlockNetworked(x, y, z);
-          this.net.sendBlock(x, y, z, BlockID.Air);
-        } else {
-          this.world.removeBlock(x, y, z);
-          this.world.edits.push({ x, y, z, b: BlockID.Air });
+        
+        const block = this.world.getBlock(x, y, z);
+        if (block && block.block !== BlockID.Bedrock) {
+          const drop = getBlockDrop(block.block);
+          if (drop) {
+            this.player.inventory.add(drop.id, drop.count);
+            this.updateHUD();
+          }
+
+          if (this.multiplayer && this.net) {
+            this.world.removeBlockNetworked(x, y, z);
+            this.net.sendBlock(x, y, z, BlockID.Air);
+          } else {
+            this.world.removeBlock(x, y, z);
+            this.world.edits.push({ x, y, z, b: BlockID.Air });
+          }
         }
-      } else if (event.button === 2 && this.player.blockPlacementCoords) {
-        if (this.player.activeBlockId != null) {
+      } else if (event.button === 2) {
+        // Handle food eating first
+        const activeSlot = this.player.inventory.slots[this.player.activeToolbarIndex];
+        if (activeSlot) {
+          const itemDef = ITEMS[activeSlot.id];
+          if (itemDef && itemDef.food) {
+            this.player.eat(itemDef.food);
+            activeSlot.count -= 1;
+            if (activeSlot.count <= 0) {
+              this.player.inventory.slots[this.player.activeToolbarIndex] = null;
+            }
+            audioManager.play("step.grass");
+            this.updateHUD();
+            return;
+          }
+        }
+
+        // Handle block placement
+        if (this.player.blockPlacementCoords && this.player.activeBlockId != null) {
           const playerPos = new THREE.Vector3(
             Math.floor(this.player.position.x),
             Math.floor(this.player.position.y) - 1,
@@ -604,6 +638,15 @@ export default class Game {
           if (playerPos.distanceTo(blockPos) <= this.player.radius * 2) return;
 
           const bid = this.player.activeBlockId;
+
+          // Deduct 1 from hotbar slot
+          if (activeSlot) {
+            activeSlot.count -= 1;
+            if (activeSlot.count <= 0) {
+              this.player.inventory.slots[this.player.activeToolbarIndex] = null;
+            }
+          }
+
           if (this.multiplayer && this.net) {
             this.world.addBlockNetworked(blockPos.x, blockPos.y, blockPos.z, bid);
             this.net.sendBlock(blockPos.x, blockPos.y, blockPos.z, bid);
@@ -611,6 +654,8 @@ export default class Game {
             this.world.addBlock(blockPos.x, blockPos.y, blockPos.z, bid);
             this.world.edits.push({ x: blockPos.x, y: blockPos.y, z: blockPos.z, b: bid });
           }
+
+          this.updateHUD();
         }
       }
     }
@@ -733,7 +778,7 @@ export default class Game {
     this.updateSkyColor();
 
     if (!this.paused) {
-      this.player.update(deltaTime, this.world);
+      this.player.update(deltaTime, this.world, this.physics);
       this.physics.update(deltaTime, this.player, this.world);
       this.world.update(this.player);
 

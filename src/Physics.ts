@@ -42,167 +42,134 @@ export class Physics {
   }
 
   update(dt: number, player: Player, world: World) {
-    this.detectCollisions(player, world);
+    // Stub for compatibility, real logic is in move() called by player
   }
 
-  detectCollisions(player: Player, world: World) {
+  isSolid(x: number, y: number, z: number, world: World): boolean {
+    if (y < 0 || y >= world.chunkSize.height) return false;
+    const block = world.getBlock(x, y, z);
+    if (!block) return false;
+    const blockClass = BlockFactory.getBlock(block.block);
+    return !blockClass.canPassThrough;
+  }
+
+  move(player: Player, displacement: THREE.Vector3, world: World) {
     player.onGround = false;
-    this.helpers.clear();
 
-    const candidates = this.broadPhase(player, world);
-    const collisions = this.narrowPhase(candidates, player);
+    // 1. Move X
+    player.pos.x += displacement.x;
+    this.resolveX(player, world, displacement.x);
 
-    if (collisions.length > 0) {
-      this.resolveCollisions(collisions, player);
-    }
+    // 2. Move Z
+    player.pos.z += displacement.z;
+    this.resolveZ(player, world, displacement.z);
+
+    // 3. Move Y
+    player.pos.y += displacement.y;
+    this.resolveY(player, world, displacement.y);
+
+    // Sync camera position back from player.pos
+    player.camera.position.set(
+      player.pos.x,
+      player.pos.y + 1.62, // 1.62 is EYE height
+      player.pos.z
+    );
   }
 
-  broadPhase(player: Player, world: World): Candidate[] {
-    const candidates: Candidate[] = [];
-
-    const minX = Math.floor(player.position.x - player.radius);
-    const maxX = Math.ceil(player.position.x + player.radius);
-    const minY = Math.floor(player.position.y - player.height);
-    const maxY = Math.ceil(player.position.y);
-    const minZ = Math.floor(player.position.z - player.radius);
-    const maxZ = Math.ceil(player.position.z + player.radius);
+  resolveX(player: Player, world: World, dx: number) {
+    const minX = Math.floor(player.pos.x - player.radius);
+    const maxX = Math.floor(player.pos.x + player.radius);
+    const minY = Math.floor(player.pos.y);
+    const maxY = Math.floor(player.pos.y + player.height);
+    const minZ = Math.floor(player.pos.z - player.radius);
+    const maxZ = Math.floor(player.pos.z + player.radius);
 
     for (let x = minX; x <= maxX; x++) {
       for (let y = minY; y <= maxY; y++) {
         for (let z = minZ; z <= maxZ; z++) {
-          const block = world.getBlock(x, y, z);
-          if (block) {
-            const blockClass = BlockFactory.getBlock(block.block);
-            if (!blockClass.canPassThrough) {
-              candidates.push({
-                block: block.block,
-                x: x + 0.5,
-                y: y + 0.5,
-                z: z + 0.5,
-              });
-              this.addCollisionHelper({
-                block: block.block,
-                x: x + 0.5,
-                y: y + 0.5,
-                z: z + 0.5,
-              });
+          if (this.isSolid(x, y, z, world)) {
+            const bMinX = x;
+            const bMaxX = x + 1;
+            const pMinX = player.pos.x - player.radius;
+            const pMaxX = player.pos.x + player.radius;
+
+            if (pMinX < bMaxX && pMaxX > bMinX) {
+              if (dx > 0) {
+                player.pos.x = bMinX - player.radius - 0.001;
+                player.vel.x = 0;
+              } else if (dx < 0) {
+                player.pos.x = bMaxX + player.radius + 0.001;
+                player.vel.x = 0;
+              }
             }
           }
         }
       }
     }
-
-    return candidates;
   }
 
-  narrowPhase(candidates: Candidate[], player: Player): Collision[] {
-    const collisions: Collision[] = [];
+  resolveZ(player: Player, world: World, dz: number) {
+    const minX = Math.floor(player.pos.x - player.radius);
+    const maxX = Math.floor(player.pos.x + player.radius);
+    const minY = Math.floor(player.pos.y);
+    const maxY = Math.floor(player.pos.y + player.height);
+    const minZ = Math.floor(player.pos.z - player.radius);
+    const maxZ = Math.floor(player.pos.z + player.radius);
 
-    for (const candidate of candidates) {
-      const closestPoint = new THREE.Vector3(
-        Math.max(
-          candidate.x - 0.5,
-          Math.min(player.position.x, candidate.x + 0.5)
-        ),
-        Math.max(
-          candidate.y - 0.5,
-          Math.min(player.position.y - player.height / 2, candidate.y + 0.5)
-        ),
-        Math.max(
-          candidate.z - 0.5,
-          Math.min(player.position.z, candidate.z + 0.5)
-        )
-      );
+    for (let x = minX; x <= maxX; x++) {
+      for (let y = minY; y <= maxY; y++) {
+        for (let z = minZ; z <= maxZ; z++) {
+          if (this.isSolid(x, y, z, world)) {
+            const bMinZ = z;
+            const bMaxZ = z + 1;
+            const pMinZ = player.pos.z - player.radius;
+            const pMaxZ = player.pos.z + player.radius;
 
-      const dx = closestPoint.x - player.position.x;
-      const dy = closestPoint.y - (player.position.y - player.height / 2);
-      const dz = closestPoint.z - player.position.z;
-
-      if (this.pointInPlayerBoundingCylinder(closestPoint, player)) {
-        const overlapY = player.height / 2 - Math.abs(dy);
-        const overlapXZ = player.radius - Math.sqrt(dx * dx + dz * dz);
-
-        let normal: THREE.Vector3;
-        let overlap: number;
-        if (overlapY < overlapXZ) {
-          normal = new THREE.Vector3(0, -Math.sign(dy), 0);
-          overlap = overlapY;
-          player.onGround = true;
-        } else {
-          normal = new THREE.Vector3(-dx, 0, -dz).normalize();
-          overlap = overlapXZ;
+            if (pMinZ < bMaxZ && pMaxZ > bMinZ) {
+              if (dz > 0) {
+                player.pos.z = bMinZ - player.radius - 0.001;
+                player.vel.z = 0;
+              } else if (dz < 0) {
+                player.pos.z = bMaxZ + player.radius + 0.001;
+                player.vel.z = 0;
+              }
+            }
+          }
         }
-
-        collisions.push({
-          candidate,
-          contactPoint: closestPoint,
-          normal,
-          overlap,
-        });
-
-        this.addContactPointerHelper(closestPoint);
       }
     }
-
-    return collisions;
   }
 
-  pointInPlayerBoundingCylinder(p: THREE.Vector3, player: Player) {
-    const dx = p.x - player.position.x;
-    const dy = p.y - (player.position.y - player.height / 2);
-    const dz = p.z - player.position.z;
-    const r_sq = dx * dx + dz * dz;
+  resolveY(player: Player, world: World, dy: number) {
+    const minX = Math.floor(player.pos.x - player.radius);
+    const maxX = Math.floor(player.pos.x + player.radius);
+    const minY = Math.floor(player.pos.y);
+    const maxY = Math.floor(player.pos.y + player.height);
+    const minZ = Math.floor(player.pos.z - player.radius);
+    const maxZ = Math.floor(player.pos.z + player.radius);
 
-    return (
-      Math.abs(dy) < player.height / 2 && r_sq < player.radius * player.radius
-    );
-  }
+    for (let x = minX; x <= maxX; x++) {
+      for (let y = minY; y <= maxY; y++) {
+        for (let z = minZ; z <= maxZ; z++) {
+          if (this.isSolid(x, y, z, world)) {
+            const bMinY = y;
+            const bMaxY = y + 1;
+            const pMinY = player.pos.y;
+            const pMaxY = player.pos.y + player.height;
 
-  resolveCollisions(collisions: Collision[], player: Player) {
-    collisions.sort((a, b) => a.overlap - b.overlap);
-
-    for (const collision of collisions) {
-      if (!this.pointInPlayerBoundingCylinder(collision.contactPoint, player)) {
-        continue;
+            if (pMinY < bMaxY && pMaxY > bMinY) {
+              if (dy > 0) {
+                player.pos.y = bMinY - player.height - 0.001;
+                player.vel.y = 0;
+              } else if (dy < 0) {
+                player.pos.y = bMaxY;
+                player.vel.y = 0;
+                player.onGround = true;
+              }
+            }
+          }
+        }
       }
-
-      const deltaPosition = collision.normal.clone();
-      deltaPosition.multiplyScalar(collision.overlap);
-
-      // Always apply the y component of the resolution — zeroing it
-      // silently lets the player fall through floors. The previous
-      // implementation nuked y when the player wasn't already on the
-      // ground, which was the cause of the "fall through floor" bug.
-      player.position.add(deltaPosition);
-
-      // If we got pushed UP by a floor, zero out downward velocity so we
-      // don't keep accelerating into the block we just landed on. We only
-      // kill velocity on the y axis when the push direction is positive
-      // (i.e. moving us out of a floor).
-      if (collision.normal.y > 0 && player.vel.y < 0) {
-        player.vel.y = 0;
-      } else if (collision.normal.y < 0 && player.vel.y > 0) {
-        // Pushed down by a ceiling — kill upward velocity.
-        player.vel.y = 0;
-      }
-
-      const magnitude = player.worldVelocity.dot(collision.normal);
-      const velocityAdj = collision.normal.clone().multiplyScalar(magnitude);
-      player.applyWorldDeltaVelocity(velocityAdj.negate());
     }
-  }
-
-  addCollisionHelper(candidate: Candidate) {
-    const blockMesh = new THREE.Mesh(collisionGeometry, collisionMaterial);
-    blockMesh.position.copy(
-      new THREE.Vector3(candidate.x, candidate.y, candidate.z)
-    );
-    this.helpers.add(blockMesh);
-  }
-
-  addContactPointerHelper(p: THREE.Vector3) {
-    const contactMesh = new THREE.Mesh(contactGeometry, contactMaterial);
-    contactMesh.position.copy(new THREE.Vector3(p.x, p.y, p.z));
-    this.helpers.add(contactMesh);
   }
 }
