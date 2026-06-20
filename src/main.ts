@@ -88,7 +88,9 @@ function main(): void {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  // Shader encodes to sRGB itself (see material.ts), so keep the renderer
+  // output linear to avoid double colorspace conversion.
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
 
   const scene = createSky();
   const atlasCanvas = createAtlasCanvas();
@@ -96,6 +98,24 @@ function main(): void {
   const world = new World();
   const chunkManager = new ChunkManager(world, atlas, SKY_COLOR);
   scene.add(chunkManager.group);
+
+  // Surface shader/program compile errors in the console — without this a
+  // broken shader renders nothing but the sky, silently. We check GL errors
+  // after the first few frames and log any non-zero status.
+  const gl = renderer.getContext();
+  let glErrorsChecked = false;
+  const checkGLErrors = () => {
+    if (glErrorsChecked) return;
+    glErrorsChecked = true;
+    const err = gl.getError();
+    if (err !== gl.NO_ERROR && err !== gl.CONTEXT_LOST_WEBGL) {
+      console.error('[Nomaecraft] WebGL error after first render:', err);
+    } else if (chunkManager.group.children.length === 0) {
+      console.warn('[Nomaecraft] No chunk meshes were built — world generation may have failed.');
+    } else {
+      console.log('[Nomaecraft] OK —', chunkManager.group.children.length, 'chunk meshes rendering.');
+    }
+  };
 
   const player = new Player(window.innerWidth / window.innerHeight);
 
@@ -229,6 +249,7 @@ function main(): void {
       ui.setDebug('');
     }
 
+    if (chunkWarmup === 5) checkGLErrors();
     renderer.render(scene, player.camera);
     requestAnimationFrame(frame);
   };

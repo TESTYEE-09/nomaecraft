@@ -26,6 +26,7 @@ export function createChunkMaterial(opts: ChunkMaterialOptions): THREE.ShaderMat
       uAlpha: { value: opts.transparent ? 0.85 : 1.0 },
     },
     vertexShader: /* glsl */ `
+      attribute float light;
       varying vec2 vUv;
       varying float vLight;
       varying float vFogDepth;
@@ -48,13 +49,17 @@ export function createChunkMaterial(opts: ChunkMaterialOptions): THREE.ShaderMat
       varying float vLight;
       varying float vFogDepth;
       void main() {
+        // The atlas texture is marked sRGB, so three's sampler already returns
+        // linear values. We shade in linear, apply fog, then encode back to
+        // sRGB for the (sRGB) default framebuffer ourselves.
         vec4 tex = texture2D(uMap, vUv);
         if (tex.a < 0.1) discard;
         vec3 color = tex.rgb * vLight;
         float fogFactor = smoothstep(uFogNear, uFogFar, vFogDepth);
         color = mix(color, uFogColor, fogFactor);
+        // Linear -> sRGB approximation.
+        color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
         gl_FragColor = vec4(color, tex.a * uAlpha);
-        #include <colorspace_fragment>
       }
     `,
     vertexColors: false,
