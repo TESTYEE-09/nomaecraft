@@ -5,6 +5,9 @@
 import { BLOCKS, Block } from './blocks';
 import { ATLAS_TILES, HOTBAR_SIZE, INVENTORY_SIZE } from './constants';
 import { Inventory, type ItemStack } from './inventory';
+import { matchRecipe, consumeForRecipe } from './recipes';
+
+export const CRAFT_GRID_SIZE = 9;
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -23,6 +26,7 @@ export interface UI {
   setMiningProgress: (p: number | null) => void;
   renderInventory: (inv: Inventory) => void;
   openInventory: (inv: Inventory) => void;
+  openCrafting: (inv: Inventory, craftGrid: Array<ItemStack | null>) => void;
   closeInventory: () => void;
   isInventoryOpen: () => boolean;
   onInventoryChange: (cb: () => void) => void;
@@ -193,6 +197,33 @@ export function createUI(atlas: HTMLCanvasElement): UI {
   const title = el('div', { fontSize: '16px', opacity: '0.85' }, 'INVENTORY');
   card.appendChild(title);
 
+  // Crafting area (3x3 grid + arrow + output), only shown near a table.
+  const craftSection = el('div', {
+    display: 'none',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '8px',
+  });
+  const craftRow = el('div', { display: 'flex', alignItems: 'center', gap: '12px' });
+  const craftGridEl = el('div', {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, 44px)',
+    gap: '4px',
+  });
+  const craftGridSlots: ReturnType<typeof makeSlot>[] = [];
+  for (let i = 0; i < CRAFT_GRID_SIZE; i++) {
+    const slot = makeSlot(44);
+    craftGridSlots.push(slot);
+    craftGridEl.appendChild(slot.root);
+  }
+  craftRow.appendChild(craftGridEl);
+  craftRow.appendChild(el('div', { fontSize: '20px', opacity: '0.7' }, '→'));
+  const craftOutputSlot = makeSlot(44);
+  craftRow.appendChild(craftOutputSlot.root);
+  craftSection.appendChild(el('div', { fontSize: '13px', opacity: '0.85' }, 'CRAFTING TABLE'));
+  craftSection.appendChild(craftRow);
+  card.insertBefore(craftSection, title.nextSibling);
+
   const grid = el('div', {
     display: 'grid',
     gridTemplateColumns: 'repeat(9, 44px)',
@@ -239,6 +270,7 @@ export function createUI(atlas: HTMLCanvasElement): UI {
   document.body.appendChild(root);
 
   let currentInventory: Inventory | null = null;
+  let currentCraftGrid: Array<ItemStack | null> | null = null;
   let held: ItemStack | null = null;
   let isOpen = false;
   let changeCb: (() => void) | null = null;
@@ -252,6 +284,10 @@ export function createUI(atlas: HTMLCanvasElement): UI {
     }
     for (let i = HOTBAR_SIZE; i < INVENTORY_SIZE; i++) {
       panelMainSlots[i - HOTBAR_SIZE].setStack(inv.slots[i], atlas);
+    }
+    if (currentCraftGrid) {
+      for (let i = 0; i < CRAFT_GRID_SIZE; i++) craftGridSlots[i].setStack(currentCraftGrid[i], atlas);
+      craftOutputSlot.setStack(matchRecipe(currentCraftGrid), atlas);
     }
     heldIcon.innerHTML = '';
     if (held) {
@@ -279,6 +315,25 @@ export function createUI(atlas: HTMLCanvasElement): UI {
   for (let i = HOTBAR_SIZE; i < INVENTORY_SIZE; i++) {
     bindSlotClick(panelMainSlots[i - HOTBAR_SIZE], i);
   }
+  craftGridSlots.forEach((slot, i) => {
+    slot.root.addEventListener('click', () => {
+      if (!currentCraftGrid) return;
+      const prev = currentCraftGrid[i];
+      currentCraftGrid[i] = held;
+      held = prev;
+      renderAll();
+      changeCb?.();
+    });
+  });
+  craftOutputSlot.root.addEventListener('click', () => {
+    if (!currentCraftGrid || held) return;
+    const result = matchRecipe(currentCraftGrid);
+    if (!result) return;
+    consumeForRecipe(currentCraftGrid);
+    held = result;
+    renderAll();
+    changeCb?.();
+  });
 
   document.addEventListener('mousemove', (e) => {
     heldIcon.style.left = `${e.clientX + 8}px`;
@@ -310,6 +365,16 @@ export function createUI(atlas: HTMLCanvasElement): UI {
     },
     openInventory(inv) {
       currentInventory = inv;
+      currentCraftGrid = null;
+      craftSection.style.display = 'none';
+      isOpen = true;
+      panel.style.display = 'flex';
+      renderAll();
+    },
+    openCrafting(inv, craftGrid) {
+      currentInventory = inv;
+      currentCraftGrid = craftGrid;
+      craftSection.style.display = 'flex';
       isOpen = true;
       panel.style.display = 'flex';
       renderAll();
@@ -317,14 +382,23 @@ export function createUI(atlas: HTMLCanvasElement): UI {
     closeInventory() {
       isOpen = false;
       panel.style.display = 'none';
-      // Drop a held stack back into the first free slot rather than losing it.
-      if (held && currentInventory) {
-        const leftover = held;
-        held = null;
-        for (let i = 0; i < leftover.count; i++) currentInventory.add(leftover.block);
+      // Drop anything still held or sitting in the craft grid back into the
+      // inventory rather than losing it.
+      if (currentInventory) {
+        if (held) {
+          for (let i = 0; i < held.count; i++) currentInventory.add(held.block);
+          held = null;
+        }
+        if (currentCraftGrid) {
+          for (const s of currentCraftGrid) {
+            if (s) for (let i = 0; i < s.count; i++) currentInventory.add(s.block);
+          }
+          currentCraftGrid.fill(null);
+        }
         renderAll();
         changeCb?.();
       }
+      currentCraftGrid = null;
     },
     isInventoryOpen() {
       return isOpen;

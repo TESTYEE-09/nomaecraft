@@ -18,6 +18,7 @@ export const enum Block {
   Brick,
   Glowstone,
   Ice,
+  CraftingTable,
 }
 
 export interface BlockDef {
@@ -40,7 +41,8 @@ export interface BlockDef {
 // Atlas tile layout (see textures.ts for what each tile looks like).
 // 0 grass-top, 1 grass-side, 2 dirt, 3 stone, 4 sand, 5 log-top, 6 log-side,
 // 7 leaves, 8 water, 9 planks, 10 cobblestone, 11 bedrock, 12 snow-side,
-// 13 glass, 14 brick, 15 glowstone, 16 ice, 17 snow-top
+// 13 glass, 14 brick, 15 glowstone, 16 ice, 17 snow-top, 18 crafting-table-top,
+// 19 crafting-table-side
 export const BLOCKS: Record<number, BlockDef> = {
   [Block.Air]: { id: Block.Air, name: 'air', tiles: [0, 0, 0], hardness: 0 },
   [Block.Grass]: { id: Block.Grass, name: 'grass', tiles: [0, 1, 2], hardness: 0.5 },
@@ -58,6 +60,7 @@ export const BLOCKS: Record<number, BlockDef> = {
   [Block.Brick]: { id: Block.Brick, name: 'brick', tiles: [14, 14, 14], hardness: 1.3 },
   [Block.Glowstone]: { id: Block.Glowstone, name: 'glowstone', tiles: [15, 15, 15], light: 15, hardness: 0.6 },
   [Block.Ice]: { id: Block.Ice, name: 'ice', tiles: [16, 16, 16], transparent: true, selfCull: true, hardness: 0.5 },
+  [Block.CraftingTable]: { id: Block.CraftingTable, name: 'crafting table', tiles: [18, 19, 9], hardness: 1.0 },
 };
 
 export function isSolid(id: Block): boolean {

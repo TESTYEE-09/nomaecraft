@@ -140,4 +140,10 @@ export class ChunkManager {
   get solidMaterial(): THREE.ShaderMaterial {
     return this.solidMat;
   }
+
+  /** Update the day/night terrain brightness multiplier on both materials. */
+  setLightLevel(level: number): void {
+    this.solidMat.uniforms.uLightLevel.value = level;
+    this.transMat.uniforms.uLightLevel.value = level;
+  }
 }

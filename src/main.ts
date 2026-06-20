@@ -6,26 +6,32 @@ import * as THREE from 'three';
 import { Block, BLOCKS } from './blocks';
 import { CHUNK_SIZE, HOTBAR_SIZE, PLAYER_HEIGHT, PLAYER_RADIUS, RENDER_DISTANCE, WORLD_HEIGHT } from './constants';
 import { ChunkManager } from './chunkmanager';
-import { Inventory } from './inventory';
+import { computeDayNight, DAY_LENGTH } from './daynight';
+import { Inventory, type ItemStack } from './inventory';
+import { MobManager } from './mob';
 import { Player, type InputState } from './player';
 import { raycastVoxel, type RayHit } from './raycast';
+import { applySave, loadGame, saveGame } from './save';
 import { initAudio, playBreak, playFootstep, playJump, playLand, playPlace } from './sound';
 import { createAtlasCanvas, createAtlasTexture } from './textures';
-import { createUI } from './ui';
+import { createUI, CRAFT_GRID_SIZE } from './ui';
 import { World } from './world';
 
 const SKY_COLOR = new THREE.Color(0x8fc6ff);
 
-function createSky(): THREE.Scene {
+function createSky(): { scene: THREE.Scene; sun: THREE.DirectionalLight; ambient: THREE.AmbientLight } {
   const scene = new THREE.Scene();
-  scene.background = SKY_COLOR.clone();
+  // Use the SAME Color instance for background/fog so the day/night clock
+  // can mutate it in place and have it show up everywhere automatically.
+  scene.background = SKY_COLOR;
   scene.fog = new THREE.Fog(SKY_COLOR.getHex(), RENDER_DISTANCE * CHUNK_SIZE * 0.55, RENDER_DISTANCE * CHUNK_SIZE * 0.95);
 
   const sun = new THREE.DirectionalLight(0xffffff, 1.0);
   sun.position.set(50, 100, 30);
   scene.add(sun);
-  scene.add(new THREE.AmbientLight(0xffffff, 0.75));
-  return scene;
+  const ambient = new THREE.AmbientLight(0xffffff, 0.75);
+  scene.add(ambient);
+  return { scene, sun, ambient };
 }
 
 function createOverlay(): { overlay: HTMLElement; onStart: (cb: () => void) => void } {
@@ -69,6 +75,7 @@ function createOverlay(): { overlay: HTMLElement; onStart: (cb: () => void) => v
     '<b>Move</b>: WASD &nbsp; <b>Jump</b>: Space &nbsp; <b>Sprint</b>: Ctrl',
     '<b>Look</b>: Mouse &nbsp; <b>Break</b>: Left Click &nbsp; <b>Place</b>: Right Click',
     '<b>Hotbar</b>: 1–9 / Scroll &nbsp; <b>Inventory</b>: E &nbsp; <b>Fly</b>: F &nbsp; <b>Debug</b>: F3 &nbsp; <b>Pause</b>: Esc',
+    'Right-click a Crafting Table to craft. Progress saves automatically.',
   ].join('<br>');
   Object.assign(controls.style, { lineHeight: '1.8', fontSize: '13px', opacity: '0.9' });
   overlay.appendChild(controls);
@@ -94,12 +101,15 @@ function main(): void {
   // output linear to avoid double colorspace conversion.
   renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
 
-  const scene = createSky();
+  const { scene, sun, ambient } = createSky();
   const atlasCanvas = createAtlasCanvas();
   const atlas = createAtlasTexture();
   const world = new World();
   const chunkManager = new ChunkManager(world, atlas, SKY_COLOR);
   scene.add(chunkManager.group);
+
+  const mobManager = new MobManager();
+  scene.add(mobManager.group);
 
   // Surface shader/program compile errors in the console — without this a
   // broken shader renders nothing but the sky, silently. We check GL errors
@@ -120,18 +130,33 @@ function main(): void {
   };
 
   const player = new Player(window.innerWidth / window.innerHeight);
-
-  // Spawn: find a grassy column near origin and stand on it.
-  const spawnX = 8, spawnZ = 8;
-  const sy = world.surfaceY(spawnX, spawnZ);
-  player.setSpawn(spawnX, Math.min(WORLD_HEIGHT - 3, sy + 2), spawnZ);
-
   const inventory = new Inventory();
+
+  // Restore a previous save (player edits, position, inventory, clock) if
+  // one exists in this browser; otherwise spawn fresh on a grassy column.
+  const save = loadGame();
+  let timeOfDay = save ? save.time : DAY_LENGTH * 0.3;
+  if (save) {
+    applySave(save, world, player, inventory);
+  } else {
+    const spawnX = 8, spawnZ = 8;
+    const sy = world.surfaceY(spawnX, spawnZ);
+    player.setSpawn(spawnX, Math.min(WORLD_HEIGHT - 3, sy + 2), spawnZ);
+  }
+
+  const craftGrid: Array<ItemStack | null> = new Array(CRAFT_GRID_SIZE).fill(null);
+
   const ui = createUI(atlasCanvas);
   ui.renderInventory(inventory);
   let selected = 0;
   ui.setSelected(selected);
   ui.onInventoryChange(() => ui.setSelected(selected));
+
+  function doSave(): void {
+    saveGame(world, player, inventory, timeOfDay);
+  }
+  setInterval(doSave, 15000);
+  window.addEventListener('beforeunload', doSave);
 
   // ---- Input state ---------------------------------------------------------
   const input: InputState = { forward: false, back: false, left: false, right: false, jump: false, crouch: false, sprint: false };
@@ -178,6 +203,12 @@ function main(): void {
       const origin = player.camera.position;
       const hit = raycastVoxel(world, origin, dir, 6);
       if (!hit) return;
+      if (world.getBlock(hit.x, hit.y, hit.z) === Block.CraftingTable) {
+        inventoryOpen = true;
+        ui.openCrafting(inventory, craftGrid);
+        document.exitPointerLock();
+        return;
+      }
       // Place adjacent — but not inside the player.
       const px = hit.x + hit.nx;
       const py = hit.y + hit.ny;
@@ -322,6 +353,16 @@ function main(): void {
       }
     }
 
+    // Day/night clock keeps running even while paused/in a menu, like chunk
+    // streaming below — only player input is gated on `locked`.
+    timeOfDay += dt;
+    const dn = computeDayNight(timeOfDay, SKY_COLOR);
+    scene.fog!.color.copy(SKY_COLOR);
+    sun.intensity = dn.sunIntensity;
+    ambient.intensity = dn.ambientIntensity;
+    chunkManager.setLightLevel(dn.lightLevel);
+    mobManager.update(dt, world, player, dn.isNight);
+
     // Stream chunks. While warming up the first batch, build more aggressively
     // so the player doesn't fall through ungenerated terrain.
     const budget = chunkWarmup < 30 ? 6 : 2;
@@ -334,7 +375,8 @@ function main(): void {
         `Nomaecraft\n` +
         `xyz: ${p.x.toFixed(1)} ${p.y.toFixed(1)} ${p.z.toFixed(1)}\n` +
         `chunks: ${world.chunks.size}  meshes: ${chunkManager.group.children.length}\n` +
-        `fly: ${player.flying ? 'ON' : 'off'}  ground: ${player.onGround ? 'yes' : 'no'}`,
+        `fly: ${player.flying ? 'ON' : 'off'}  ground: ${player.onGround ? 'yes' : 'no'}\n` +
+        `time: ${(timeOfDay % DAY_LENGTH).toFixed(0)}/${DAY_LENGTH}  ${dn.isNight ? 'night' : 'day'}`,
       );
     } else {
       ui.setDebug('');

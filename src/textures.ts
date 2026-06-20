@@ -199,6 +199,31 @@ function snowTop(): Painter {
   return noisePainter('#f4f8ff', 8, 71);
 }
 
+function craftingTableTop(): Painter {
+  return (ctx, x0, y0) => {
+    planksPainter()(ctx, x0, y0);
+    // diagonal grid motif suggesting a recipe layout, like a workbench top.
+    ctx.strokeStyle = 'rgba(40,30,15,0.6)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x0 + 1.5, y0 + 1.5, TILE - 3, TILE - 3);
+    ctx.beginPath();
+    ctx.moveTo(x0 + 1.5, y0 + TILE / 2);
+    ctx.lineTo(x0 + TILE - 1.5, y0 + TILE / 2);
+    ctx.moveTo(x0 + TILE / 2, y0 + 1.5);
+    ctx.lineTo(x0 + TILE / 2, y0 + TILE - 1.5);
+    ctx.stroke();
+  };
+}
+
+function craftingTableSide(): Painter {
+  return (ctx, x0, y0) => {
+    noisePainter('#7d5a36', 10, 89)(ctx, x0, y0);
+    ctx.fillStyle = shade('#7d5a36', -30);
+    ctx.fillRect(x0, y0, TILE, 2);
+    ctx.fillRect(x0, y0 + TILE - 2, TILE, 2);
+  };
+}
+
 function snowSide(): Painter {
   return (ctx, x0, y0) => {
     noisePainter('#7a5236', 14, 7)(ctx, x0, y0);
@@ -234,6 +259,8 @@ const PAINTERS: Painter[] = [
   glowstonePainter(),// 15
   icePainter(),      // 16
   snowTop(),         // 17
+  craftingTableTop(),  // 18
+  craftingTableSide(), // 19
 ];
 
 // Tile 5 should be a clean log ring top, not the side streaks.

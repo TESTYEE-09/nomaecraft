@@ -137,6 +137,16 @@ export class World {
     this.edits.set(x + ',' + y + ',' + z, b);
   }
 
+  /** All player edits, for saving. Procedural terrain is regenerated from the seed, not stored. */
+  exportEdits(): Array<[string, Block]> {
+    return [...this.edits.entries()];
+  }
+
+  /** Restore edits before any chunks are generated, so they replay correctly. */
+  importEdits(data: Array<[string, Block]>): void {
+    this.edits = new Map(data);
+  }
+
   private generate(chunk: Chunk, cx: number, cz: number): void {
     for (let lz = 0; lz < CHUNK_SIZE; lz++) {
       for (let lx = 0; lx < CHUNK_SIZE; lx++) {

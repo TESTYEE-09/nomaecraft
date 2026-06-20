@@ -24,6 +24,7 @@ export function createChunkMaterial(opts: ChunkMaterialOptions): THREE.ShaderMat
       uFogNear: { value: opts.fogNear },
       uFogFar: { value: opts.fogFar },
       uAlpha: { value: opts.transparent ? 0.85 : 1.0 },
+      uLightLevel: { value: 1.0 },
     },
     vertexShader: /* glsl */ `
       attribute float light;
@@ -45,6 +46,7 @@ export function createChunkMaterial(opts: ChunkMaterialOptions): THREE.ShaderMat
       uniform float uFogNear;
       uniform float uFogFar;
       uniform float uAlpha;
+      uniform float uLightLevel;
       varying vec2 vUv;
       varying float vLight;
       varying float vFogDepth;
@@ -54,7 +56,7 @@ export function createChunkMaterial(opts: ChunkMaterialOptions): THREE.ShaderMat
         // sRGB for the (sRGB) default framebuffer ourselves.
         vec4 tex = texture2D(uMap, vUv);
         if (tex.a < 0.1) discard;
-        vec3 color = tex.rgb * vLight;
+        vec3 color = tex.rgb * vLight * uLightLevel;
         float fogFactor = smoothstep(uFogNear, uFogFar, vFogDepth);
         color = mix(color, uFogColor, fogFactor);
         // Linear -> sRGB approximation.
