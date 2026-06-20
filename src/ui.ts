@@ -3,7 +3,7 @@
 // elements created and styled in code.
 
 import { BLOCKS, Block } from './blocks';
-import { ATLAS_TILES, HOTBAR_SIZE, INVENTORY_SIZE } from './constants';
+import { ATLAS_TILES, HOTBAR_SIZE, INVENTORY_SIZE, MAX_STACK } from './constants';
 import { Inventory, type ItemStack } from './inventory';
 import { matchRecipe, consumeForRecipe } from './recipes';
 
@@ -214,9 +214,13 @@ export function createUI(atlas: HTMLCanvasElement): UI {
     personalSlots.push(slot);
     personalGridEl.appendChild(slot.root);
     slot.root.addEventListener('click', () => {
-      const prev = personalGrid[idx];
-      personalGrid[idx] = held;
-      held = prev;
+      leftClickSlot(personalGrid, idx);
+      renderAll();
+      changeCb?.();
+    });
+    slot.root.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      rightClickSlot(personalGrid, idx);
       renderAll();
       changeCb?.();
     });
@@ -290,7 +294,7 @@ export function createUI(atlas: HTMLCanvasElement): UI {
   }
   card.appendChild(panelHotbar);
 
-  const hint = el('div', { fontSize: '11px', opacity: '0.6' }, 'Click a slot to pick it up, click again to place/swap. E to close.');
+  const hint = el('div', { fontSize: '11px', opacity: '0.6' }, 'Left-click: pick up/place/stack a whole slot. Right-click: move one item at a time. E to close.');
   card.appendChild(hint);
 
   panel.appendChild(card);
@@ -342,30 +346,76 @@ export function createUI(atlas: HTMLCanvasElement): UI {
     }
   }
 
-  function bindSlotClick(slot: ReturnType<typeof makeSlot>, index: number): void {
+  // Left click: pick up/place a whole stack, or merge onto a matching stack
+  // (capped at MAX_STACK). Right click: pick up/place one item at a time.
+  function leftClickSlot(arr: Array<ItemStack | null>, index: number): void {
+    const cur = arr[index];
+    if (!held) {
+      arr[index] = null;
+      held = cur;
+    } else if (!cur) {
+      arr[index] = held;
+      held = null;
+    } else if (cur.block === held.block) {
+      const space = MAX_STACK - cur.count;
+      const move = Math.min(space, held.count);
+      cur.count += move;
+      held.count -= move;
+      if (held.count <= 0) held = null;
+    } else {
+      arr[index] = held;
+      held = cur;
+    }
+  }
+
+  function rightClickSlot(arr: Array<ItemStack | null>, index: number): void {
+    const cur = arr[index];
+    if (!held) {
+      if (!cur) return;
+      const take = Math.ceil(cur.count / 2);
+      held = { block: cur.block, count: take };
+      cur.count -= take;
+      if (cur.count <= 0) arr[index] = null;
+    } else {
+      if (!cur) {
+        arr[index] = { block: held.block, count: 1 };
+        held.count--;
+      } else if (cur.block === held.block && cur.count < MAX_STACK) {
+        cur.count++;
+        held.count--;
+      } else {
+        return;
+      }
+      if (held.count <= 0) held = null;
+    }
+  }
+
+  function bindSlotInteract(slot: ReturnType<typeof makeSlot>, getArr: () => Array<ItemStack | null> | null, index: number): void {
     slot.root.addEventListener('click', () => {
-      if (!currentInventory) return;
-      held = currentInventory.swap(index, held);
+      const arr = getArr();
+      if (!arr) return;
+      leftClickSlot(arr, index);
+      renderAll();
+      changeCb?.();
+    });
+    slot.root.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const arr = getArr();
+      if (!arr) return;
+      rightClickSlot(arr, index);
       renderAll();
       changeCb?.();
     });
   }
   for (let i = 0; i < HOTBAR_SIZE; i++) {
-    bindSlotClick(hotbarSlots[i], i);
-    bindSlotClick(panelHotbarSlots[i], i);
+    bindSlotInteract(hotbarSlots[i], () => currentInventory?.slots ?? null, i);
+    bindSlotInteract(panelHotbarSlots[i], () => currentInventory?.slots ?? null, i);
   }
   for (let i = HOTBAR_SIZE; i < INVENTORY_SIZE; i++) {
-    bindSlotClick(panelMainSlots[i - HOTBAR_SIZE], i);
+    bindSlotInteract(panelMainSlots[i - HOTBAR_SIZE], () => currentInventory?.slots ?? null, i);
   }
   craftGridSlots.forEach((slot, i) => {
-    slot.root.addEventListener('click', () => {
-      if (!currentCraftGrid) return;
-      const prev = currentCraftGrid[i];
-      currentCraftGrid[i] = held;
-      held = prev;
-      renderAll();
-      changeCb?.();
-    });
+    bindSlotInteract(slot, () => currentCraftGrid, i);
   });
   craftOutputSlot.root.addEventListener('click', () => {
     if (!currentCraftGrid || held) return;
