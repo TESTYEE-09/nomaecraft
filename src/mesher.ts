@@ -22,6 +22,12 @@ interface Face {
   side1: [number, number, number];
   side2: [number, number, number];
   tileFace: 'top' | 'side' | 'bottom';
+  // Which corner component (0=x, 1=y, 2=z) drives texture U/V. Fixed per
+  // face so UV doesn't depend on the corners[] winding order/start point —
+  // otherwise reordering corners (e.g. for AO/winding fixes) silently
+  // rotates the texture.
+  uAxis: 0 | 1 | 2;
+  vAxis: 0 | 1 | 2;
 }
 
 // Each face's four corners are ordered counter-clockwise when viewed from
@@ -41,6 +47,8 @@ const FACES: Face[] = [
     side1: [0, 1, 0],
     side2: [0, 0, 1],
     tileFace: 'side',
+    uAxis: 2,
+    vAxis: 1,
   },
   {
     // -X (west)
@@ -54,6 +62,8 @@ const FACES: Face[] = [
     side1: [0, 0, 1],
     side2: [0, 1, 0],
     tileFace: 'side',
+    uAxis: 2,
+    vAxis: 1,
   },
   {
     // +Y (top)
@@ -67,6 +77,8 @@ const FACES: Face[] = [
     side1: [0, 0, 1],
     side2: [1, 0, 0],
     tileFace: 'top',
+    uAxis: 0,
+    vAxis: 2,
   },
   {
     // -Y (bottom)
@@ -80,6 +92,8 @@ const FACES: Face[] = [
     side1: [1, 0, 0],
     side2: [0, 0, 1],
     tileFace: 'bottom',
+    uAxis: 0,
+    vAxis: 2,
   },
   {
     // +Z (south)
@@ -93,6 +107,8 @@ const FACES: Face[] = [
     side1: [1, 0, 0],
     side2: [0, 1, 0],
     tileFace: 'side',
+    uAxis: 0,
+    vAxis: 1,
   },
   {
     // -Z (north)
@@ -106,6 +122,8 @@ const FACES: Face[] = [
     side1: [0, 1, 0],
     side2: [1, 0, 0],
     tileFace: 'side',
+    uAxis: 0,
+    vAxis: 1,
   },
 ];
 
@@ -215,19 +233,12 @@ export function buildChunkMesh(world: World, cx: number, cz: number): MeshBuffer
             cornerAO.push(aoShade(aoLevel(side1Occ, side2Occ, cornerOcc)) * FACE_SHADE[f]);
           }
 
-          // UVs per corner: corners 0..3 walk the quad CCW, map them onto the
-          // tile rect so the texture is upright and not mirrored.
-          const uvMap: Array<[number, number]> = [
-            [u0, v1],
-            [u0, v0],
-            [u1, v0],
-            [u1, v1],
-          ];
-
           for (let ci = 0; ci < 4; ci++) {
             const c = face.corners[ci];
             verts.push(c[0] + lx + baseX, c[1] + y, c[2] + lz + baseZ);
-            verts.push(uvMap[ci][0], uvMap[ci][1]);
+            // UV derived straight from the corner's coordinate along the
+            // face's fixed uAxis/vAxis — independent of corners[] ordering.
+            verts.push(c[face.uAxis] ? u1 : u0, c[face.vAxis] ? v1 : v0);
             verts.push(face.normal[0], face.normal[1], face.normal[2]);
             verts.push(cornerAO[ci]);
           }
