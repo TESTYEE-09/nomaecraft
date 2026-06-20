@@ -23,3 +23,8 @@ export const WALK_SPEED = 4.7; // blocks/s
 export const SPRINT_SPEED = 7.0; // blocks/s
 export const FLY_SPEED = 9.0; // blocks/s (creative fly)
 export const TERMINAL_VELOCITY = 55; // max fall speed
+
+/** Inventory layout: 9 hotbar slots + 27 backpack slots. */
+export const HOTBAR_SIZE = 9;
+export const INVENTORY_SIZE = 36;
+export const MAX_STACK = 64;

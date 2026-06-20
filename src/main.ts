@@ -3,11 +3,13 @@
 // then runs the main loop: input -> physics -> chunk streaming -> render.
 
 import * as THREE from 'three';
-import { Block, HOTBAR, isSolid } from './blocks';
-import { CHUNK_SIZE, PLAYER_HEIGHT, PLAYER_RADIUS, RENDER_DISTANCE, WORLD_HEIGHT } from './constants';
+import { Block, BLOCKS } from './blocks';
+import { CHUNK_SIZE, HOTBAR_SIZE, PLAYER_HEIGHT, PLAYER_RADIUS, RENDER_DISTANCE, WORLD_HEIGHT } from './constants';
 import { ChunkManager } from './chunkmanager';
+import { Inventory } from './inventory';
 import { Player, type InputState } from './player';
-import { raycastVoxel } from './raycast';
+import { raycastVoxel, type RayHit } from './raycast';
+import { initAudio, playBreak, playFootstep, playJump, playLand, playPlace } from './sound';
 import { createAtlasCanvas, createAtlasTexture } from './textures';
 import { createUI } from './ui';
 import { World } from './world';
@@ -66,7 +68,7 @@ function createOverlay(): { overlay: HTMLElement; onStart: (cb: () => void) => v
   controls.innerHTML = [
     '<b>Move</b>: WASD &nbsp; <b>Jump</b>: Space &nbsp; <b>Sprint</b>: Ctrl',
     '<b>Look</b>: Mouse &nbsp; <b>Break</b>: Left Click &nbsp; <b>Place</b>: Right Click',
-    '<b>Hotbar</b>: 1–9 / Scroll &nbsp; <b>Fly</b>: F &nbsp; <b>Debug</b>: F3 &nbsp; <b>Pause</b>: Esc',
+    '<b>Hotbar</b>: 1–9 / Scroll &nbsp; <b>Inventory</b>: E &nbsp; <b>Fly</b>: F &nbsp; <b>Debug</b>: F3 &nbsp; <b>Pause</b>: Esc',
   ].join('<br>');
   Object.assign(controls.style, { lineHeight: '1.8', fontSize: '13px', opacity: '0.9' });
   overlay.appendChild(controls);
@@ -124,24 +126,42 @@ function main(): void {
   const sy = world.surfaceY(spawnX, spawnZ);
   player.setSpawn(spawnX, Math.min(WORLD_HEIGHT - 3, sy + 2), spawnZ);
 
+  const inventory = new Inventory();
   const ui = createUI(atlasCanvas);
+  ui.renderInventory(inventory);
   let selected = 0;
   ui.setSelected(selected);
+  ui.onInventoryChange(() => ui.setSelected(selected));
 
   // ---- Input state ---------------------------------------------------------
   const input: InputState = { forward: false, back: false, left: false, right: false, jump: false, crouch: false, sprint: false };
   let locked = false;
   let showDebug = false;
+  let inventoryOpen = false;
+  let leftDown = false;
+  let mining: { x: number; y: number; z: number; progress: number } | null = null;
 
   const overlay = createOverlay();
   overlay.onStart(() => {
+    initAudio();
     canvas.requestPointerLock();
   });
 
   document.addEventListener('pointerlockchange', () => {
     locked = document.pointerLockElement === canvas;
-    overlay.overlay.style.display = locked ? 'none' : 'flex';
+    overlay.overlay.style.display = !locked && !inventoryOpen ? 'flex' : 'none';
+    if (!locked) {
+      leftDown = false;
+      mining = null;
+      ui.setMiningProgress(null);
+    }
   });
+
+  function closeInventory(): void {
+    inventoryOpen = false;
+    ui.closeInventory();
+    canvas.requestPointerLock();
+  }
 
   document.addEventListener('mousemove', (e) => {
     if (!locked) return;
@@ -150,23 +170,33 @@ function main(): void {
 
   document.addEventListener('mousedown', (e) => {
     if (!locked) return;
-    const dir = new THREE.Vector3();
-    player.camera.getWorldDirection(dir).normalize();
-    const origin = player.camera.position;
-    const hit = raycastVoxel(world, origin, dir, 6);
-    if (!hit) return;
     if (e.button === 0) {
-      // Break
-      world.setBlock(hit.x, hit.y, hit.z, Block.Air);
-      chunkManager.invalidate(Math.floor(hit.x / CHUNK_SIZE), Math.floor(hit.z / CHUNK_SIZE));
+      leftDown = true;
     } else if (e.button === 2) {
+      const dir = new THREE.Vector3();
+      player.camera.getWorldDirection(dir).normalize();
+      const origin = player.camera.position;
+      const hit = raycastVoxel(world, origin, dir, 6);
+      if (!hit) return;
       // Place adjacent — but not inside the player.
       const px = hit.x + hit.nx;
       const py = hit.y + hit.ny;
       const pz = hit.z + hit.nz;
       if (intersectsPlayer(px, py, pz, player)) return;
-      world.setBlock(px, py, pz, HOTBAR[selected]);
+      const stack = inventory.slots[selected];
+      if (!stack) return;
+      world.setBlock(px, py, pz, stack.block);
       chunkManager.invalidate(Math.floor(px / CHUNK_SIZE), Math.floor(pz / CHUNK_SIZE));
+      inventory.removeOne(selected);
+      ui.renderInventory(inventory);
+      playPlace();
+    }
+  });
+  document.addEventListener('mouseup', (e) => {
+    if (e.button === 0) {
+      leftDown = false;
+      mining = null;
+      ui.setMiningProgress(null);
     }
   });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -187,11 +217,23 @@ function main(): void {
         e.preventDefault();
         if (locked) showDebug = !showDebug;
         break;
+      case 'KeyE':
+        if (locked) {
+          inventoryOpen = true;
+          ui.openInventory(inventory);
+          document.exitPointerLock();
+        } else if (inventoryOpen) {
+          closeInventory();
+        }
+        break;
+      case 'Escape':
+        if (inventoryOpen) closeInventory();
+        break;
     }
     // Hotbar number keys.
     if (e.code.startsWith('Digit')) {
       const n = parseInt(e.code.slice(5), 10) - 1;
-      if (n >= 0 && n < HOTBAR.length) { selected = n; ui.setSelected(selected); }
+      if (n >= 0 && n < HOTBAR_SIZE) { selected = n; ui.setSelected(selected); }
     }
   });
 
@@ -210,7 +252,7 @@ function main(): void {
   document.addEventListener('wheel', (e) => {
     if (!locked) return;
     const dir = e.deltaY > 0 ? 1 : -1;
-    selected = (selected + dir + HOTBAR.length) % HOTBAR.length;
+    selected = (selected + dir + HOTBAR_SIZE) % HOTBAR_SIZE;
     ui.setSelected(selected);
   });
 
@@ -223,12 +265,61 @@ function main(): void {
   // ---- Main loop -----------------------------------------------------------
   let last = performance.now();
   let chunkWarmup = 0;
+  let footstepTimer = 0;
   const frame = (now: number) => {
     const dt = (now - last) / 1000;
     last = now;
 
     if (locked) {
+      const groundedBefore = player.onGround;
       player.update(dt, input, world);
+
+      if (!player.flying) {
+        if (groundedBefore && !player.onGround && player.velocity.y > 0) playJump();
+        if (!groundedBefore && player.onGround) playLand();
+      }
+
+      const moving = (input.forward || input.back || input.left || input.right) && player.onGround && !player.flying;
+      if (moving) {
+        footstepTimer -= dt;
+        if (footstepTimer <= 0) {
+          playFootstep();
+          footstepTimer = input.sprint ? 0.28 : 0.4;
+        }
+      } else {
+        footstepTimer = 0;
+      }
+
+      // Mining: hold left click on a targeted block until its hardness is met.
+      if (leftDown && !inventoryOpen) {
+        const dir = new THREE.Vector3();
+        player.camera.getWorldDirection(dir).normalize();
+        const hit: RayHit | null = raycastVoxel(world, player.camera.position, dir, 6);
+        if (hit) {
+          if (!mining || mining.x !== hit.x || mining.y !== hit.y || mining.z !== hit.z) {
+            mining = { x: hit.x, y: hit.y, z: hit.z, progress: 0 };
+          }
+          const block = world.getBlock(hit.x, hit.y, hit.z);
+          const hardness = BLOCKS[block]?.hardness ?? 0.5;
+          mining.progress += dt;
+          ui.setMiningProgress(Math.min(1, mining.progress / hardness));
+          if (mining.progress >= hardness) {
+            world.setBlock(hit.x, hit.y, hit.z, Block.Air);
+            chunkManager.invalidate(Math.floor(hit.x / CHUNK_SIZE), Math.floor(hit.z / CHUNK_SIZE));
+            inventory.add(block);
+            ui.renderInventory(inventory);
+            playBreak();
+            mining = null;
+            ui.setMiningProgress(null);
+          }
+        } else if (mining) {
+          mining = null;
+          ui.setMiningProgress(null);
+        }
+      } else if (mining) {
+        mining = null;
+        ui.setMiningProgress(null);
+      }
     }
 
     // Stream chunks. While warming up the first batch, build more aggressively
@@ -270,8 +361,5 @@ function intersectsPlayer(x: number, y: number, z: number, player: Player): bool
     z + 1 > minZ && z < maxZ
   );
 }
-
-// Guard against placing a block type we then treat as solid (kept simple).
-void isSolid;
 
 main();
