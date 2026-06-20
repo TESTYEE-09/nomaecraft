@@ -197,6 +197,46 @@ export function createUI(atlas: HTMLCanvasElement): UI {
   const title = el('div', { fontSize: '16px', opacity: '0.85' }, 'INVENTORY');
   card.appendChild(title);
 
+  // Personal 2x2 crafting grid — always available, no table needed. This is
+  // how basic recipes (and the table recipe itself) get bootstrapped; the
+  // 3x3 table grid below is for bigger recipes only.
+  const PERSONAL_SLOTS = [0, 1, 3, 4]; // top-left 2x2 of a 3x3 grid
+  const personalGrid: Array<ItemStack | null> = new Array(9).fill(null);
+  const personalRow = el('div', { display: 'flex', alignItems: 'center', gap: '12px' });
+  const personalGridEl = el('div', {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, 44px)',
+    gap: '4px',
+  });
+  const personalSlots: ReturnType<typeof makeSlot>[] = [];
+  for (const idx of PERSONAL_SLOTS) {
+    const slot = makeSlot(44);
+    personalSlots.push(slot);
+    personalGridEl.appendChild(slot.root);
+    slot.root.addEventListener('click', () => {
+      const prev = personalGrid[idx];
+      personalGrid[idx] = held;
+      held = prev;
+      renderAll();
+      changeCb?.();
+    });
+  }
+  personalRow.appendChild(personalGridEl);
+  personalRow.appendChild(el('div', { fontSize: '20px', opacity: '0.7' }, '→'));
+  const personalOutputSlot = makeSlot(44);
+  personalRow.appendChild(personalOutputSlot.root);
+  personalOutputSlot.root.addEventListener('click', () => {
+    if (held) return;
+    const result = matchRecipe(personalGrid);
+    if (!result) return;
+    consumeForRecipe(personalGrid);
+    held = result;
+    renderAll();
+    changeCb?.();
+  });
+  card.appendChild(el('div', { fontSize: '13px', opacity: '0.85' }, 'CRAFT'));
+  card.appendChild(personalRow);
+
   // Crafting area (3x3 grid + arrow + output), only shown near a table.
   const craftSection = el('div', {
     display: 'none',
@@ -289,6 +329,8 @@ export function createUI(atlas: HTMLCanvasElement): UI {
       for (let i = 0; i < CRAFT_GRID_SIZE; i++) craftGridSlots[i].setStack(currentCraftGrid[i], atlas);
       craftOutputSlot.setStack(matchRecipe(currentCraftGrid), atlas);
     }
+    PERSONAL_SLOTS.forEach((idx, i) => personalSlots[i].setStack(personalGrid[idx], atlas));
+    personalOutputSlot.setStack(matchRecipe(personalGrid), atlas);
     heldIcon.innerHTML = '';
     if (held) {
       heldIcon.style.display = 'block';
@@ -395,6 +437,10 @@ export function createUI(atlas: HTMLCanvasElement): UI {
           }
           currentCraftGrid.fill(null);
         }
+        for (const s of personalGrid) {
+          if (s) for (let i = 0; i < s.count; i++) currentInventory.add(s.block);
+        }
+        personalGrid.fill(null);
         renderAll();
         changeCb?.();
       }
